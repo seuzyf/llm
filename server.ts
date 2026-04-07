@@ -70,7 +70,13 @@ async function startServer() {
       const data = await response.json();
       res.json(data);
     } catch (error: any) {
-      console.error('Error fetching models:', error);
+      console.error('Error fetching models:', error.message);
+      if (error.message.includes('ECONNREFUSED')) {
+        return res.status(503).json({ 
+          error: 'Could not connect to LM Studio. Please ensure LM Studio is running locally and the Local Server is started on port 1234.',
+          isConnectionRefused: true
+        });
+      }
       res.status(500).json({ error: error.message || 'Internal Server Error' });
     }
   });

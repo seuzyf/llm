@@ -42,12 +42,15 @@ export default function App() {
     const fetchModels = async () => {
       try {
         const res = await fetch('/api/models');
-        if (res.ok) {
-          const data = await res.json();
-          if (data.data && data.data.length > 0) {
-            setModels(data.data);
-            setSelectedModel(data.data[0].id);
-          }
+        const data = await res.json();
+        
+        if (res.ok && data.data && data.data.length > 0) {
+          setModels(data.data);
+          setSelectedModel(data.data[0].id);
+        } else if (data.isConnectionRefused) {
+          // Fallback for when LM Studio is not reachable (e.g. in cloud preview)
+          setModels([{ id: 'lm-studio-not-connected', object: 'model', owned_by: 'system' }]);
+          setSelectedModel('lm-studio-not-connected');
         }
       } catch (error) {
         console.error('Failed to fetch models', error);
