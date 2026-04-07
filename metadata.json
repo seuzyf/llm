@@ -1,0 +1,5 @@
+{
+  "name": "Local LLM Chat",
+  "description": "A chat interface for local LM Studio instances with markdown support and chat history.",
+  "requestFramePermissions": []
+}
