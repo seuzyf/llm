@@ -3,6 +3,10 @@ export interface Message {
   role: 'system' | 'user' | 'assistant';
   content: string;
   timestamp: number;
+  fileUrl?: string;
+  fileName?: string;
+  fileContent?: string;
+  imageBase64?: string; // 新增：用于多模态视觉的Base64数据
 }
 
 export interface ChatSession {
