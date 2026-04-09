@@ -1,12 +1,21 @@
+// src/types.ts
+export interface MessageFile {
+  name: string;
+  url: string;
+  content: string;
+  isTruncated?: boolean; // 新增：标记是否因为过长而被截断
+}
+
 export interface Message {
   id: string;
   role: 'system' | 'user' | 'assistant';
   content: string;
+  reasoningContent?: string;
   timestamp: number;
-  fileUrl?: string;
-  fileName?: string;
-  fileContent?: string;
-  imageBase64?: string; // 新增：用于多模态视觉的Base64数据
+  files?: MessageFile[];
+  imageBase64?: string;
+  isUploading?: boolean;
+  progress?: number;
 }
 
 export interface ChatSession {
