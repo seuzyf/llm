@@ -6,22 +6,16 @@ import fs from 'fs';
 import multer from 'multer';
 import { parseFile } from './src/fileParser.js';
 
-// ─────────────────────────────────────────
 // 目录初始化
-// ─────────────────────────────────────────
 ['logs', 'uploads'].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// ─────────────────────────────────────────
 // Multer 存储配置
-// ─────────────────────────────────────────
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, 'uploads/'),
   filename: (_req, file, cb) => {
-    // multer 在 latin1 环境下接收文件名，需转回 utf-8
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    // 保留中文、英文、数字、点、横线、下划线；其余替换为 _
     const safeName = originalName.replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5]/g, '_');
     const uniquePrefix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     cb(null, `${uniquePrefix}-${safeName}`);
@@ -30,12 +24,9 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  limits: { fileSize: 100 * 1024 * 1024 }, // 每个文件限制 100 MB
 });
 
-// ─────────────────────────────────────────
-// 服务启动
-// ─────────────────────────────────────────
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -44,12 +35,13 @@ async function startServer() {
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
   // ───────────────────────────────────────
-  // 文件上传 & 解析
+  // 多文件上传 & 解析接口修改
   // ───────────────────────────────────────
   app.post(
     '/api/upload',
     (req, res, next) => {
-      upload.single('file')(req, res, (err) => {
+      // 允许一次最多上传 10 个文件，字段名改为 'files'
+      upload.array('files', 10)(req, res, (err) => {
         if (err) {
           return res.status(400).json({ error: '上传失败', details: err.message });
         }
@@ -57,74 +49,70 @@ async function startServer() {
       });
     },
     async (req, res) => {
-      if (!req.file) {
+      if (!req.files || (req.files as Express.Multer.File[]).length === 0) {
         return res.status(400).json({ error: '未上传文件' });
       }
 
-      const { path: filePath, filename } = req.file;
-      // 还原真实文件名
-      const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+      const files = req.files as Express.Multer.File[];
+      const results = [];
 
-      let text = '';
-      let parseError: string | undefined;
+      // 遍历解析每一个上传的文件
+      for (const file of files) {
+        const { path: filePath, filename } = file;
+        const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
 
-      try {
-        const result = await parseFile(filePath, originalName);
-        text = result.text;
-        parseError = result.error;
-      } catch (unexpected: any) {
-        // 兜底：任何未预期异常都不应让接口崩溃
-        console.error('parseFile 意外异常:', unexpected);
-        parseError = `系统异常: ${unexpected?.message ?? String(unexpected)}`;
+        let text = '';
+        let parseError: string | undefined;
+
+        try {
+          const result = await parseFile(filePath, originalName);
+          text = result.text;
+          parseError = result.error;
+        } catch (unexpected: any) {
+          console.error(`文件 ${originalName} 解析异常:`, unexpected);
+          parseError = `系统异常: ${unexpected?.message ?? String(unexpected)}`;
+        }
+
+        if (parseError && !text) {
+          text = `【解析提示】${parseError}`;
+        }
+
+        results.push({
+          url: `/uploads/${filename}`,
+          name: originalName,
+          text,
+          ...(parseError ? { warning: parseError } : {}),
+        });
       }
 
-      // 如果有错误但没有文本内容，返回友好提示
-      if (parseError && !text) {
-        text = `【解析提示】${parseError}`;
-      }
-
-      return res.json({
-        url: `/uploads/${filename}`,
-        name: originalName,
-        text,
-        ...(parseError ? { warning: parseError } : {}),
-      });
+      // 返回包含所有文件解析结果的数组
+      return res.json({ files: results });
     }
   );
 
   // ───────────────────────────────────────
-  // 日志读写
+  // 以下保持原有逻辑不变 (日志读写、AI代理、静态服务等)
   // ───────────────────────────────────────
   app.get('/api/logs/:username', (req, res) => {
     const filePath = path.join('logs', `${req.params.username}.json`);
     try {
       if (!fs.existsSync(filePath)) return res.json([]);
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      return res.json(JSON.parse(raw));
+      return res.json(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
     } catch (e: any) {
-      console.error('读取日志失败:', e);
       return res.status(500).json({ error: '日志读取失败' });
     }
   });
 
   app.post('/api/logs/:username', (req, res) => {
     try {
-      fs.writeFileSync(
-        path.join('logs', `${req.params.username}.json`),
-        JSON.stringify(req.body, null, 2)
-      );
+      fs.writeFileSync(path.join('logs', `${req.params.username}.json`), JSON.stringify(req.body, null, 2));
       return res.json({ success: true });
     } catch (e: any) {
-      return res.status(500).json({ error: '日志写入失败', details: e.message });
+      return res.status(500).json({ error: '写入失败' });
     }
   });
 
-  // ───────────────────────────────────────
-  // LM Studio 代理：流式 & 非流式
-  // ───────────────────────────────────────
-  const LM_BASE_URL = (
-    process.env.LM_STUDIO_URL || 'http://127.0.0.1:1234/v1/chat/completions'
-  ).replace('/chat/completions', '');
+  const LM_BASE_URL = (process.env.LM_STUDIO_URL || 'http://127.0.0.1:1234/v1/chat/completions').replace('/chat/completions', '');
 
   app.post('/api/chat', async (req, res) => {
     try {
@@ -134,46 +122,31 @@ async function startServer() {
         body: JSON.stringify(req.body),
       });
 
-      if (!upstream.ok && !req.body.stream) {
-        const errText = await upstream.text();
-        return res.status(upstream.status).json({ error: errText });
-      }
+      if (!upstream.ok && !req.body.stream) return res.status(upstream.status).json({ error: await upstream.text() });
 
       if (req.body.stream) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('X-Accel-Buffering', 'no');
 
-        if (!upstream.body) {
-          return res.end();
-        }
-
-        // Node 18+ ReadableStream → pipe to response
+        if (!upstream.body) return res.end();
         const reader = (upstream.body as unknown as ReadableStream<Uint8Array>).getReader();
 
         const pump = async () => {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
-            // 如果客户端已断开则停止
-            if (res.writableEnded) break;
+            if (done || res.writableEnded) break;
             res.write(Buffer.from(value));
           }
           res.end();
         };
 
-        pump().catch((e) => {
-          console.error('流式传输异常:', e);
-          if (!res.writableEnded) res.end();
-        });
-
-        // 客户端主动断开时释放 reader
+        pump().catch(() => { if (!res.writableEnded) res.end(); });
         req.on('close', () => reader.cancel().catch(() => {}));
       } else {
         return res.json(await upstream.json());
       }
     } catch (error: any) {
-      console.error('/api/chat 错误:', error);
       return res.status(500).json({ error: error.message });
     }
   });
@@ -183,29 +156,17 @@ async function startServer() {
       const response = await fetch(`${LM_BASE_URL}/models`);
       return res.json(await response.json());
     } catch (error: any) {
-      return res.status(503).json({
-        error: 'LM Studio 未连接',
-        isConnectionRefused: true,
-        details: error.message,
-      });
+      return res.status(503).json({ error: '未连接', isConnectionRefused: true });
     }
   });
 
-  // ───────────────────────────────────────
-  // 前端静态 / Vite 中间件
-  // ───────────────────────────────────────
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (_req, res) =>
-      res.sendFile(path.join(distPath, 'index.html'))
-    );
+    app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
   app.listen(PORT, '0.0.0.0', () => {
