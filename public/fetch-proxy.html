@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>
+  window.addEventListener('message', async (event) => {
+    if (event.data?.type !== 'FETCH_URL') return;
+    const { url, requestId } = event.data;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+        }
+      });
+      const buffer = await res.arrayBuffer();
+      const contentType = res.headers.get('content-type') || '';
+      event.source.postMessage({
+        type: 'FETCH_RESULT',
+        requestId,
+        ok: res.ok,
+        status: res.status,
+        contentType,
+        buffer,
+      }, event.origin, [buffer]);
+    } catch(err) {
+      event.source.postMessage({
+        type: 'FETCH_RESULT',
+        requestId,
+        ok: false,
+        error: err.message,
+      }, event.origin);
+    }
+  });
+</script>
+</body>
+</html>
