@@ -4,7 +4,7 @@ import { Message, ChatSession, MessageFile } from '../types';
 import {
   Send, StopCircle, Paperclip, X, FileText, Brain,
   ChevronDown, ChevronRight, AlertTriangle, FileUp, Link, AlertCircle,
-  FileSpreadsheet // 新增：用于模板的图标
+  FileSpreadsheet
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,7 +30,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
   const [showUrlModal, setShowUrlModal] = useState(false);
   const [tempUrl, setTempUrl] = useState('');
   
-  // ── 模板功能新增状态 ──
   const [templateMode, setTemplateMode] = useState<string | null>(null);
   const [templateFiles, setTemplateFiles] = useState<File[]>([]);
 
@@ -101,7 +100,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     }
   };
 
-  // ── 核心流式对话提取（复用） ─────────────────────────────
   const processChatStream = async (currentMessages: Message[], assistantId: string) => {
     abortControllerRef.current = new AbortController();
     let assistantMsg = currentMessages.find(m => m.id === assistantId)!;
@@ -116,7 +114,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
 
       for (const m of historyWindow) {
         let text = m.content;
-        if (m.files && m.files.length > 0) {
+        if (m.files && m.files.length > 0 && !m.isTemplateCall) {
           const hasTextFiles = m.files.some((f) => f.content);
           if (hasTextFiles) {
             text += `\n\n[附件数据]:\n`;
@@ -214,7 +212,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     }
   };
 
-  // ── 模板提交流程 ──────────────────────────────────────────
   const handleTemplateSubmit = async () => {
     if (templateFiles.length === 0 || isGenerating) return;
 
@@ -227,6 +224,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
       files: templateFiles.map(f => ({ name: f.name, url: '', content: '' })),
       isUploading: true,
       progress: 0,
+      isTemplateCall: true, // 核心改动：打上特殊UI渲染标签
     };
 
     let currentMessages = [...session.messages, userMessage];
@@ -237,7 +235,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
       const formData = new FormData();
       templateFiles.forEach(f => formData.append('files', f));
 
-      // 调用服务端特有的模板接口
       const res = await fetch('/api/template/audit', {
         method: 'POST',
         body: formData
@@ -251,17 +248,14 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
       const data = await res.json();
       const finalPrompt = data.prompt;
 
-      // 替换为最终拼接好 Excel 数据的 Prompt
       currentMessages = currentMessages.map(m =>
         m.id === userMsgId ? { ...m, content: finalPrompt, isUploading: false, progress: 100 } : m
       );
       onUpdateMessages(currentMessages);
       
-      // 成功后清理模板上传状态
       setTemplateMode(null);
       setTemplateFiles([]);
 
-      // 发起大模型对话
       const assistantId = uuidv4();
       const assistantMsg: Message = {
         id: assistantId, role: 'assistant', content: '', reasoningContent: '', timestamp: Date.now(),
@@ -280,7 +274,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     }
   };
 
-  // ── 常规提交流程 ──────────────────────────────────────────
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (
@@ -323,7 +316,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     let uploadedMessageFiles: MessageFile[] = [];
     let parsedUrlFiles: MessageFile[] = [];
 
-    // 文件上传
     if (currentFilesToUpload.length > 0) {
       try {
         const uploadResult = await new Promise<any>((resolve, reject) => {
@@ -371,7 +363,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
       }
     }
 
-    // 网址抓取
     if (hasUrls) {
       for (const url of allUrlsToParse) {
         let result: any = null;
@@ -379,10 +370,8 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
         const browserResult = await browserFetchUrl(url);
 
         if (!browserResult.hasError) {
-          console.log(`[URL抓取] 浏览器端成功: ${url}`);
           result = browserResult;
         } else if (browserResult.errorMsg === 'CORS_BLOCKED') {
-          console.log(`[URL抓取] CORS拦截，回退服务端: ${url}`);
           try {
             const res = await fetch('/api/parse-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
             const data = await res.json();
@@ -391,7 +380,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
             result = { title: '接口请求失败', text: `[⚠️ 系统日志：服务端调用失败，详情：${apiErr.message}]`, url, hasError: true, source: 'server' };
           }
         } else {
-          console.log(`[URL抓取] 浏览器端失败(${browserResult.errorMsg})，尝试服务端: ${url}`);
           try {
             const res = await fetch('/api/parse-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
             const data = await res.json();
@@ -420,7 +408,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     currentMessages = [...currentMessages, assistantMsg];
     onUpdateMessages(currentMessages);
 
-    // 调用提取的大模型交互逻辑
     await processChatStream(currentMessages, assistantId);
   };
 
@@ -443,96 +430,141 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
               <div
                 className={`max-w-[85%] md:max-w-[75%] rounded-2xl px-5 py-4 ${
                   message.role === 'user'
-                    ? 'bg-blue-600 text-white'
+                    ? message.isTemplateCall ? 'bg-blue-900/40 border border-blue-700/50 text-white' : 'bg-blue-600 text-white'
                     : 'bg-[#313244] text-gray-200'
                 }`}
               >
                 {message.role === 'user' ? (
-                  <div className="flex flex-col gap-2">
-                    {message.content && (
-                      <div className="whitespace-pre-wrap">{message.content}</div>
-                    )}
-                    {message.files && message.files.length > 0 && (
-                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {message.files.map((file, idx) => {
-                          const isUrlAttachment =
-                            file.url &&
-                            file.url.startsWith('http') &&
-                            file.url === file.name;
-                          const isError =
-                            (file as any).hasError === true ||
-                            (!!file.content && file.content.startsWith('[⚠️'));
-                          const isSuccess = !isError && !!file.content;
-
-                          return (
-                            <div
-                              key={idx}
-                              className="bg-black/20 p-3 rounded-lg w-full flex flex-col justify-between border border-white/5"
-                            >
-                              <div className="flex items-center gap-2 mb-2">
-                                {isUrlAttachment ? (
-                                  <Link size={16} className="text-blue-300 shrink-0" />
-                                ) : (
-                                  <FileText size={16} className="text-blue-300 shrink-0" />
-                                )}
-                                <span className="truncate text-sm" title={file.name}>
-                                  {file.name}
-                                </span>
-                              </div>
-
-                              {message.isUploading ? (
-                                <div className="space-y-1.5 mt-auto">
-                                  <div className="w-full bg-gray-700 h-1.5 rounded-full overflow-hidden">
-                                    <div
-                                      className="bg-blue-400 h-full transition-all duration-200"
-                                      style={{ width: `${message.progress || 0}%` }}
-                                    />
-                                  </div>
-                                  <div className="text-[10px] text-gray-300 text-right">
-                                    处理中 {message.progress}%
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="flex items-center justify-between mt-auto pt-2 gap-2 flex-wrap">
-                                  <div className="flex gap-2 items-center flex-wrap">
-                                    {file.url && (
-                                      <a
-                                        href={file.url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="text-[10px] underline text-blue-200 hover:text-blue-100"
-                                      >
-                                        {file.url.startsWith('http') ? '访问' : '下载'}
-                                      </a>
-                                    )}
-                                    {isSuccess ? (
-                                      <span className="text-[10px] text-green-300 opacity-90 border border-green-400/30 px-1.5 py-0.5 rounded whitespace-nowrap">
-                                        {isUrlAttachment ? '内容已抓取' : '文本已提取'}
-                                      </span>
-                                    ) : (
-                                      <span className="text-[10px] text-red-300 opacity-90 border border-red-400/30 px-1.5 py-0.5 rounded whitespace-nowrap flex items-center gap-1">
-                                        <AlertCircle size={10} />
-                                        {isUrlAttachment ? '抓取失败' : '提取异常'}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {file.isTruncated && (
-                                    <span
-                                      className="text-[10px] font-medium text-yellow-300 bg-yellow-400/20 border border-yellow-400/40 px-1.5 py-0.5 rounded whitespace-nowrap flex items-center gap-1 cursor-help"
-                                      title="内容超过阈值，已被截断"
-                                    >
-                                      <AlertTriangle size={10} />
-                                      内容已截断
-                                    </span>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
+                  message.isTemplateCall ? (
+                    /* ======== 模板调用专属的干净 UI 展示 ======== */
+                    <div className="flex flex-col gap-3 min-w-[280px]">
+                      <div className="font-medium flex items-center gap-2 text-blue-300">
+                        <FileSpreadsheet size={18} />
+                        <span>系统任务：供应商答复自动审核</span>
                       </div>
-                    )}
-                  </div>
+                      
+                      <div className="text-sm text-blue-200/80">已接收以下文件，开始进行答复审核：</div>
+                      
+                      {message.files && message.files.length > 0 && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
+                          {message.files.map((file, idx) => {
+                            const isError = message.content.includes('⚠️ **系统提示:**');
+                            return (
+                              <div key={idx} className="bg-black/30 p-2.5 rounded-lg flex items-center justify-between border border-white/10 shadow-sm">
+                                <div className="flex items-center gap-2 overflow-hidden pr-2">
+                                  <FileText size={16} className="text-blue-400 shrink-0" />
+                                  <span className="truncate text-sm text-gray-200" title={file.name}>
+                                    {file.name}
+                                  </span>
+                                </div>
+                                {message.isUploading ? (
+                                  <span className="text-[10px] text-blue-400 shrink-0 ml-2 whitespace-nowrap">正在处理... {message.progress}%</span>
+                                ) : isError ? (
+                                  <span className="text-[10px] text-red-400 border border-red-500/30 px-1.5 py-0.5 rounded shrink-0 ml-2 whitespace-nowrap">执行异常</span>
+                                ) : (
+                                  <span className="text-[10px] text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded shrink-0 ml-2 whitespace-nowrap">拼接提取成功</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      
+                      {/* 如果有系统报错，仍然显示出来以免排查不到问题 */}
+                      {message.content.includes('⚠️ **系统提示:**') && (
+                        <div className="mt-2 text-xs text-red-300 bg-red-950/40 p-2.5 rounded border border-red-800/50">
+                          {message.content.split('⚠️ **系统提示:**')[1]}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    /* ======== 普通用户对话的 UI ======== */
+                    <div className="flex flex-col gap-2">
+                      {message.content && (
+                        <div className="whitespace-pre-wrap">{message.content}</div>
+                      )}
+                      {message.files && message.files.length > 0 && (
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {message.files.map((file, idx) => {
+                            const isUrlAttachment =
+                              file.url &&
+                              file.url.startsWith('http') &&
+                              file.url === file.name;
+                            const isError =
+                              (file as any).hasError === true ||
+                              (!!file.content && file.content.startsWith('[⚠️'));
+                            const isSuccess = !isError && !!file.content;
+
+                            return (
+                              <div
+                                key={idx}
+                                className="bg-black/20 p-3 rounded-lg w-full flex flex-col justify-between border border-white/5"
+                              >
+                                <div className="flex items-center gap-2 mb-2">
+                                  {isUrlAttachment ? (
+                                    <Link size={16} className="text-blue-300 shrink-0" />
+                                  ) : (
+                                    <FileText size={16} className="text-blue-300 shrink-0" />
+                                  )}
+                                  <span className="truncate text-sm" title={file.name}>
+                                    {file.name}
+                                  </span>
+                                </div>
+
+                                {message.isUploading ? (
+                                  <div className="space-y-1.5 mt-auto">
+                                    <div className="w-full bg-gray-700 h-1.5 rounded-full overflow-hidden">
+                                      <div
+                                        className="bg-blue-400 h-full transition-all duration-200"
+                                        style={{ width: `${message.progress || 0}%` }}
+                                      />
+                                    </div>
+                                    <div className="text-[10px] text-gray-300 text-right">
+                                      处理中 {message.progress}%
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center justify-between mt-auto pt-2 gap-2 flex-wrap">
+                                    <div className="flex gap-2 items-center flex-wrap">
+                                      {file.url && (
+                                        <a
+                                          href={file.url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-[10px] underline text-blue-200 hover:text-blue-100"
+                                        >
+                                          {file.url.startsWith('http') ? '访问' : '下载'}
+                                        </a>
+                                      )}
+                                      {isSuccess ? (
+                                        <span className="text-[10px] text-green-300 opacity-90 border border-green-400/30 px-1.5 py-0.5 rounded whitespace-nowrap">
+                                          {isUrlAttachment ? '内容已抓取' : '文本已提取'}
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] text-red-300 opacity-90 border border-red-400/30 px-1.5 py-0.5 rounded whitespace-nowrap flex items-center gap-1">
+                                          <AlertCircle size={10} />
+                                          {isUrlAttachment ? '抓取失败' : '提取异常'}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {file.isTruncated && (
+                                      <span
+                                        className="text-[10px] font-medium text-yellow-300 bg-yellow-400/20 border border-yellow-400/40 px-1.5 py-0.5 rounded whitespace-nowrap flex items-center gap-1 cursor-help"
+                                        title="内容超过阈值，已被截断"
+                                      >
+                                        <AlertTriangle size={10} />
+                                        内容已截断
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )
                 ) : (
                   <div className="w-full">
                     {(() => {
@@ -622,7 +654,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
       <div className="p-4 bg-[#1e1e2e] border-t border-gray-800 shrink-0">
         <div className="max-w-4xl mx-auto relative">
           
-          {/* ── 新增：模板功能按钮组 ── */}
           <div className="flex gap-2 mb-2">
             <button
               onClick={() => setTemplateMode(templateMode === 'audit_supplier' ? null : 'audit_supplier')}
@@ -689,7 +720,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                   } focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500`
             }`}
           >
-            {/* ── 模板激活时，渲染专用上传区 ── */}
             {templateMode === 'audit_supplier' ? (
               <div className="w-full flex flex-col items-center justify-center min-h-[120px] text-center animate-in fade-in zoom-in-95 duration-200">
                 <FileSpreadsheet size={40} className="text-gray-500 mb-3 opacity-50" />
@@ -697,9 +727,28 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                 <input
                   type="file"
                   multiple
-                  accept=".xls,.xlsx"
+                  // 放宽并增加了各种表格以及csv格式支持
+                  accept=".xls,.xlsx,.xlsm,.xlsb,.csv"
                   onChange={(e) => {
-                    if (e.target.files) setTemplateFiles(Array.from(e.target.files));
+                    if (e.target.files) {
+                      const files = Array.from(e.target.files);
+                      const validExts = ['.xls', '.xlsx', '.xlsm', '.xlsb', '.csv'];
+                      
+                      // 校验是否包含了非表格格式
+                      const hasInvalidFormat = files.some(f => {
+                        const name = f.name.toLowerCase();
+                        return !validExts.some(ext => name.endsWith(ext));
+                      });
+
+                      if (hasInvalidFormat) {
+                        const confirm = window.confirm('提示：您选择了非表格（Excel/CSV）格式的文件，直接使用该模板流程可能会导致数据提取异常。\n\n确认要继续吗？');
+                        if (!confirm) {
+                          e.target.value = ''; // 如果用户取消，清空输入框
+                          return;
+                        }
+                      }
+                      setTemplateFiles(files);
+                    }
                   }}
                   className="mb-4 text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-5 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer transition-colors"
                 />
@@ -734,7 +783,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                 </div>
               </div>
             ) : (
-              // ── 常规模式：保留原来的输入框和附件功能 ──
               <>
                 <input
                   type="file"
@@ -825,7 +873,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
             )}
           </form>
 
-          {/* 提示文案隐藏在模板模式下 */}
           {!templateMode && (
             <div className="text-center mt-2 text-xs text-gray-500">
               按 Enter 发送。目前上下文长度为120k，单次对话只能处理10万字以下数据
