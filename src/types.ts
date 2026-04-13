@@ -16,6 +16,7 @@ export interface Message {
   imageBase64?: string;
   isUploading?: boolean;
   progress?: number;
+  isTemplateCall?: boolean; // 新增：标记是否为特殊模板调用，用于隐藏原始prompt并渲染专属UI
 }
 
 export interface ChatSession {
