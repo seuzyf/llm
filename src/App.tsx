@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Message, ChatSession, ModelInfo } from './types';
 import Sidebar from './components/Sidebar';
@@ -12,11 +12,13 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
+  // 全局生成状态，用来阻止多开对话框并发提交
+  const [isGenerating, setIsGenerating] = useState(false);
+
   const [username, setUsername] = useState('');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loginInput, setLoginInput] = useState('');
 
-  // 检查本地缓存并加载记录
   useEffect(() => {
     const savedUser = localStorage.getItem('chat_username');
     if (savedUser) {
@@ -42,7 +44,6 @@ export default function App() {
     }
   };
 
-  // 只要会话有更新就同步到服务器日志
   useEffect(() => {
     if (isLoggedIn && username && sessions.length > 0) {
       fetch(`/api/logs/${username}`, {
@@ -223,6 +224,8 @@ export default function App() {
             session={currentSession}
             onUpdateMessages={(msgs) => updateSessionMessages(currentSession.id, msgs)}
             selectedModel={selectedModel}
+            isGenerating={isGenerating}
+            setIsGenerating={setIsGenerating}
           />
         )}
       </div>
