@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Message, ChatSession, MessageFile } from '../types';
 import {
-  Send, StopCircle, Paperclip, X, FileText, Brain,
+  Send, Paperclip, X, FileText, Brain,
   ChevronDown, ChevronRight, AlertTriangle, FileUp, Link, AlertCircle,
   FileSpreadsheet
 } from 'lucide-react';
@@ -16,14 +16,15 @@ interface ChatAreaProps {
   session: ChatSession;
   onUpdateMessages: (messages: Message[]) => void;
   selectedModel: string;
+  isGenerating: boolean;
+  setIsGenerating: (val: boolean) => void;
 }
 
 const MAX_UPLOAD_LENGTH = 100000;
 const MAX_CONTEXT_CHARS = 80000;
 
-export default function ChatArea({ session, onUpdateMessages, selectedModel }: ChatAreaProps) {
+export default function ChatArea({ session, onUpdateMessages, selectedModel, isGenerating, setIsGenerating }: ChatAreaProps) {
   const [input, setInput] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [selectedUrls, setSelectedUrls] = useState<string[]>([]);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
@@ -64,14 +65,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
-
-  const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-      setIsGenerating(false);
-    }
-  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -219,12 +212,12 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     const userMessage: Message = {
       id: userMsgId,
       role: 'user',
-      content: '【系统指令】正在通过 Python 脚本解析 Excel 答复文件并生成审核指令...',
+      content: '【技术应答审核】',
       timestamp: Date.now(),
       files: templateFiles.map(f => ({ name: f.name, url: '', content: '' })),
       isUploading: true,
       progress: 0,
-      isTemplateCall: true, // 核心改动：打上特殊UI渲染标签
+      isTemplateCall: true, 
     };
 
     let currentMessages = [...session.messages, userMessage];
@@ -436,7 +429,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
               >
                 {message.role === 'user' ? (
                   message.isTemplateCall ? (
-                    /* ======== 模板调用专属的干净 UI 展示 ======== */
                     <div className="flex flex-col gap-3 min-w-[280px]">
                       <div className="font-medium flex items-center gap-2 text-blue-300">
                         <FileSpreadsheet size={18} />
@@ -470,7 +462,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                         </div>
                       )}
                       
-                      {/* 如果有系统报错，仍然显示出来以免排查不到问题 */}
                       {message.content.includes('⚠️ **系统提示:**') && (
                         <div className="mt-2 text-xs text-red-300 bg-red-950/40 p-2.5 rounded border border-red-800/50">
                           {message.content.split('⚠️ **系统提示:**')[1]}
@@ -478,7 +469,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                       )}
                     </div>
                   ) : (
-                    /* ======== 普通用户对话的 UI ======== */
                     <div className="flex flex-col gap-2">
                       {message.content && (
                         <div className="whitespace-pre-wrap">{message.content}</div>
@@ -636,7 +626,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                               }}
                             >
                               {displayContent ||
-                                (isGenerating && !displayReasoning ? '...' : '')}
+                                (isGenerating && !displayReasoning ? '模型正在思考中...' : '')}
                             </ReactMarkdown>
                           </div>
                         </>
@@ -657,11 +647,12 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
           <div className="flex gap-2 mb-2">
             <button
               onClick={() => setTemplateMode(templateMode === 'audit_supplier' ? null : 'audit_supplier')}
+              disabled={isGenerating}
               className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
                 templateMode === 'audit_supplier'
                   ? 'bg-[#313244] text-blue-400 border border-b-0 border-gray-700 shadow-[0_4px_0_0_#313244] translate-y-[1px] relative z-10'
                   : 'bg-transparent text-gray-400 hover:text-gray-200 border border-transparent'
-              }`}
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               <FileSpreadsheet size={16} />
               审核供应商答复
@@ -682,7 +673,8 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                   <span className="truncate max-w-[150px] text-gray-300">{file.name}</span>
                   <button
                     onClick={() => removeSelectedFile(index)}
-                    className="text-gray-400 hover:text-red-400 ml-1"
+                    disabled={isGenerating}
+                    className="text-gray-400 hover:text-red-400 ml-1 disabled:opacity-50"
                   >
                     <X size={14} />
                   </button>
@@ -699,7 +691,8 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                   </span>
                   <button
                     onClick={() => removeSelectedUrl(index)}
-                    className="text-gray-400 hover:text-red-400 ml-1"
+                    disabled={isGenerating}
+                    className="text-gray-400 hover:text-red-400 ml-1 disabled:opacity-50"
                   >
                     <X size={14} />
                   </button>
@@ -723,18 +716,17 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
             {templateMode === 'audit_supplier' ? (
               <div className="w-full flex flex-col items-center justify-center min-h-[120px] text-center animate-in fade-in zoom-in-95 duration-200">
                 <FileSpreadsheet size={40} className="text-gray-500 mb-3 opacity-50" />
-                <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格 (支持多选)</p>
+                <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格或邮件 (支持多选)</p>
                 <input
                   type="file"
                   multiple
-                  // 放宽并增加了各种表格以及csv格式支持
-                  accept=".xls,.xlsx,.xlsm,.xlsb,.csv"
+                  disabled={isGenerating}
+                  accept=".xls,.xlsx,.xlsm,.xlsb,.csv,.msg"
                   onChange={(e) => {
                     if (e.target.files) {
                       const files = Array.from(e.target.files);
-                      const validExts = ['.xls', '.xlsx', '.xlsm', '.xlsb', '.csv'];
+                      const validExts = ['.xls', '.xlsx', '.xlsm', '.xlsb', '.csv', '.msg'];
                       
-                      // 校验是否包含了非表格格式
                       const hasInvalidFormat = files.some(f => {
                         const name = f.name.toLowerCase();
                         return !validExts.some(ext => name.endsWith(ext));
@@ -743,14 +735,14 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                       if (hasInvalidFormat) {
                         const confirm = window.confirm('提示：您选择了非表格（Excel/CSV）格式的文件，直接使用该模板流程可能会导致数据提取异常。\n\n确认要继续吗？');
                         if (!confirm) {
-                          e.target.value = ''; // 如果用户取消，清空输入框
+                          e.target.value = ''; 
                           return;
                         }
                       }
                       setTemplateFiles(files);
                     }
                   }}
-                  className="mb-4 text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-5 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer transition-colors"
+                  className="mb-4 text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-5 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 />
                 
                 {templateFiles.length > 0 && (
@@ -768,7 +760,8 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                   <button
                     type="button"
                     onClick={() => { setTemplateMode(null); setTemplateFiles([]); }}
-                    className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+                    disabled={isGenerating}
+                    className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     取消
                   </button>
@@ -789,6 +782,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                   multiple
                   ref={fileInputRef}
                   onChange={handleFileChange}
+                  disabled={isGenerating}
                   className="hidden"
                 />
 
@@ -796,7 +790,8 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                   <button
                     type="button"
                     onClick={() => setShowAttachMenu(!showAttachMenu)}
-                    className={`p-2 transition-colors rounded-lg ${
+                    disabled={isGenerating}
+                    className={`p-2 transition-colors rounded-lg disabled:opacity-50 disabled:cursor-not-allowed ${
                       showAttachMenu
                         ? 'bg-gray-700 text-blue-400'
                         : 'text-gray-400 hover:text-blue-400 hover:bg-gray-800'
@@ -806,7 +801,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                     <Paperclip size={20} />
                   </button>
 
-                  {showAttachMenu && (
+                  {showAttachMenu && !isGenerating && (
                     <div className="absolute bottom-[calc(100%+8px)] left-0 w-36 bg-[#181825] border border-gray-700 rounded-lg shadow-xl overflow-hidden z-50">
                       <button
                         type="button"
@@ -841,33 +836,23 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
                       handleSubmit(e);
                     }
                   }}
-                  placeholder="输入消息..."
-                  className="w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none"
+                  disabled={isGenerating}
+                  placeholder={isGenerating ? "模型正在处理任务中，请稍候..." : "输入消息..."}
+                  className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''}`}
                   rows={1}
                 />
 
                 <div className="flex shrink-0 mb-1 mr-1">
-                  {isGenerating ? (
-                    <button
-                      type="button"
-                      onClick={handleStop}
-                      className="p-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors"
-                    >
-                      <StopCircle size={20} />
-                    </button>
-                  ) : (
-                    <button
-                      type="submit"
-                      disabled={
-                        !input.trim() &&
-                        selectedFiles.length === 0 &&
-                        selectedUrls.length === 0
-                      }
-                      className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      <Send size={20} />
-                    </button>
-                  )}
+                  <button
+                    type="submit"
+                    disabled={
+                      isGenerating ||
+                      (!input.trim() && selectedFiles.length === 0 && selectedUrls.length === 0)
+                    }
+                    className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Send size={20} />
+                  </button>
                 </div>
               </>
             )}
