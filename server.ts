@@ -9,6 +9,10 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import iconv from 'iconv-lite';
 import { parseFile } from './src/fileParser.js';
+import { exec } from 'child_process';
+import util from 'util';
+
+const execPromise = util.promisify(exec);
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
@@ -327,6 +331,50 @@ async function startServer() {
       return res.json({ files: results });
     }
   );
+
+  // ── 模板处理接口 ───────────────────────────────────────────
+  app.post('/api/template/audit', async (req, res) => {
+    const batchId = Date.now().toString();
+    // 创建一个临时批次文件夹，用于存放此次上传的 Excel 文件
+    const batchDir = path.join(process.cwd(), 'uploads', 'templates', batchId);
+    fs.mkdirSync(batchDir, { recursive: true });
+
+    const templateStorage = multer.diskStorage({
+      destination: batchDir,
+      filename: (_req, file, cb) => {
+        const safeName = Buffer.from(file.originalname, 'latin1').toString('utf8').replace(/[^a-zA-Z0-9.\-_\u4e00-\u9fa5]/g, '_');
+        cb(null, safeName);
+      }
+    });
+
+    const templateUpload = multer({ storage: templateStorage }).array('files', 20);
+
+    templateUpload(req, res, async (err) => {
+      if (err) return res.status(400).json({ error: '上传失败' });
+      if (!req.files || (req.files as Express.Multer.File[]).length === 0) return res.status(400).json({ error: '未上传文件' });
+
+      try {
+        const scriptPath = path.join(process.cwd(), 'src', 'scripts', 'audit_supplier', 'excel.py');
+        const promptPath = path.join(process.cwd(), 'src', 'scripts', 'audit_supplier', 'prompt.txt');
+
+        if (!fs.existsSync(scriptPath) || !fs.existsSync(promptPath)) {
+          return res.status(500).json({ error: '服务端未找到对应的模板脚本文件，请确认是否已手动创建 src/scripts/audit_supplier 目录及相关文件。' });
+        }
+
+        // 执行 Python 脚本，传入存储 Excel 的文件夹路径
+        const { stdout } = await execPromise(`python "${scriptPath}" "${batchDir}"`);
+        
+        // 读取 prompt 模板并替换内容
+        const promptTemplate = fs.readFileSync(promptPath, 'utf-8');
+        const finalPrompt = promptTemplate.replace('{excel_content}', stdout);
+
+        res.json({ prompt: finalPrompt });
+      } catch (error: any) {
+        console.error('模板处理失败:', error);
+        res.status(500).json({ error: '模板解析失败', details: error.message });
+      }
+    });
+  });
 
   // ── 网址解析（核心接口）────────────────────────────────────
   app.post('/api/parse-url', async (req, res) => {
