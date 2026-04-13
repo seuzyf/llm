@@ -35,9 +35,6 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 },
 });
 
-// ─────────────────────────────────────────────────────────────
-// 多个 UA 轮换，降低被拦截概率
-// ─────────────────────────────────────────────────────────────
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
@@ -49,11 +46,8 @@ function randomUA(): string {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
-// ─────────────────────────────────────────────────────────────
-// axios 实例：使用原生 http/https agent，彻底绕开 undici
-// ─────────────────────────────────────────────────────────────
 const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,  // 忽略自签名证书
+  rejectUnauthorized: false, 
   keepAlive: true,
   timeout: 1500,
 });
@@ -63,27 +57,21 @@ const httpAgent = new http.Agent({
 });
 
 const axiosClient = axios.create({
-  timeout: 1500,               // 请求总超时 15 秒
-  maxRedirects: 5,              // 最多跟随 5 次重定向
-  responseType: 'arraybuffer', // 拿原始字节，方便处理编码
+  timeout: 1500,               
+  maxRedirects: 5,             
+  responseType: 'arraybuffer', 
   httpsAgent,
   httpAgent,
   decompress: true,
-  validateStatus: () => true,  // 不抛 HTTP 错误，统一在业务层判断
+  validateStatus: () => true,  
 });
 
-// ─────────────────────────────────────────────────────────────
-// 编码自动检测（优先 BOM / meta charset / content-type，最后 UTF-8）
-// ─────────────────────────────────────────────────────────────
 function detectEncoding(buffer: Buffer, contentType: string): string {
-  // 1. Content-Type header
   const ctMatch = contentType.match(/charset=([^\s;]+)/i);
   if (ctMatch) return ctMatch[1].toLowerCase().replace(/['"]/g, '');
 
-  // 2. BOM
   if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'utf-8';
 
-  // 3. meta charset（前 4096 字节）
   const head = buffer.slice(0, 4096).toString('latin1');
   const metaMatch =
     head.match(/charset=["']?([a-zA-Z0-9\-_]+)/i) ||
@@ -93,9 +81,6 @@ function detectEncoding(buffer: Buffer, contentType: string): string {
   return 'utf-8';
 }
 
-// ─────────────────────────────────────────────────────────────
-// 核心抓取函数（含重试）
-// ─────────────────────────────────────────────────────────────
 interface FetchResult {
   title: string;
   text: string;
@@ -125,10 +110,8 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
       const status = response.status;
       const contentType: string = response.headers['content-type'] || '';
 
-      // HTTP 层失败
       if (status >= 400) {
         lastError = `HTTP ${status}`;
-        // 4xx 不重试（无意义），直接返回错误
         if (status >= 400 && status < 500) {
           return {
             title: '网页访问被拒',
@@ -138,11 +121,9 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
             errorMsg: `HTTP ${status}`,
           };
         }
-        // 5xx 继续重试
         continue;
       }
 
-      // 非文本类型
       if (
         contentType &&
         !contentType.includes('text/') &&
@@ -159,7 +140,6 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         };
       }
 
-      // 解码
       const buffer = Buffer.from(response.data);
       const encoding = detectEncoding(buffer, contentType);
       let html: string;
@@ -170,19 +150,14 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         html = buffer.toString('utf-8');
       }
 
-      // 用 cheerio 提取正文
       const $ = cheerio.load(html);
-
-      // 移除无用节点
       $('script, style, noscript, iframe, svg, canvas, nav, footer, header, aside, .ad, .ads, .advertisement, [class*="banner"], [id*="banner"]').remove();
 
-      // 提取标题
       const title =
         $('meta[property="og:title"]').attr('content') ||
         $('title').text().trim() ||
         url;
 
-      // 优先提取 article / main / .content 等语义节点
       let text = '';
       const contentSelectors = [
         'article',
@@ -205,12 +180,10 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         }
       }
 
-      // fallback: 整个 body
       if (!text || text.trim().length < 100) {
         text = $('body').text();
       }
 
-      // 清理空白
       text = text
         .replace(/\t/g, ' ')
         .replace(/\r\n/g, '\n')
@@ -219,7 +192,6 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 
-      // SPA 检测
       if (
         text.length < 200 &&
         (html.includes('id="root"') || html.includes('id="app"'))
@@ -237,7 +209,6 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
       lastError = `${code ? `[${code}] ` : ''}${msg}`;
       console.error(`抓取 [${url}] 第 ${attempt + 1} 次失败:`, err?.message ?? err);
 
-      // 最后一次重试失败才返回错误
       if (attempt === retries) {
         let friendlyMsg = lastError;
 
@@ -261,8 +232,6 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
           errorMsg: friendlyMsg,
         };
       }
-
-      // 重试前等待（指数退避）
       await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
     }
   }
@@ -275,9 +244,47 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
   };
 }
 
+// ── 任务队列系统 ─────────────────────────────────────────────
+const MAX_CONCURRENT_TASKS = 3;
+let activeChatTasks = 0;
+const chatTaskQueue: (() => void)[] = [];
+
+async function acquireChatTaskSlot(req: express.Request): Promise<void> {
+  return new Promise((resolve) => {
+    if (activeChatTasks < MAX_CONCURRENT_TASKS) {
+      activeChatTasks++;
+      resolve();
+    } else {
+      let isResolved = false;
+      const queueItem = () => {
+        if (isResolved) return;
+        isResolved = true;
+        activeChatTasks++;
+        resolve();
+      };
+      chatTaskQueue.push(queueItem);
+
+      req.on('close', () => {
+        if (!isResolved) {
+          isResolved = true; 
+          const idx = chatTaskQueue.indexOf(queueItem);
+          if (idx !== -1) chatTaskQueue.splice(idx, 1);
+        }
+      });
+    }
+  });
+}
+
+function releaseChatTaskSlot() {
+  activeChatTasks--;
+  if (activeChatTasks < 0) activeChatTasks = 0;
+  if (chatTaskQueue.length > 0) {
+    const nextTask = chatTaskQueue.shift();
+    if (nextTask) nextTask();
+  }
+}
 // ─────────────────────────────────────────────────────────────
-// Express 服务
-// ─────────────────────────────────────────────────────────────
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -285,7 +292,6 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
-  // ── 文件上传 ──────────────────────────────────────────────
   app.post(
     '/api/upload',
     (req, res, next) => {
@@ -332,10 +338,8 @@ async function startServer() {
     }
   );
 
-  // ── 模板处理接口 ───────────────────────────────────────────
   app.post('/api/template/audit', async (req, res) => {
     const batchId = Date.now().toString();
-    // 创建一个临时批次文件夹，用于存放此次上传的 Excel 文件
     const batchDir = path.join(process.cwd(), 'uploads', 'templates', batchId);
     fs.mkdirSync(batchDir, { recursive: true });
 
@@ -361,10 +365,7 @@ async function startServer() {
           return res.status(500).json({ error: '服务端未找到对应的模板脚本文件，请确认是否已手动创建 src/scripts/audit_supplier 目录及相关文件。' });
         }
 
-        // 执行 Python 脚本，传入存储 Excel 的文件夹路径
         const { stdout } = await execPromise(`python "${scriptPath}" "${batchDir}"`);
-        
-        // 读取 prompt 模板并替换内容
         const promptTemplate = fs.readFileSync(promptPath, 'utf-8');
         const finalPrompt = promptTemplate.replace('{excel_content}', stdout);
 
@@ -376,7 +377,6 @@ async function startServer() {
     });
   });
 
-  // ── 网址解析（核心接口）────────────────────────────────────
   app.post('/api/parse-url', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: '缺少 URL' });
@@ -385,11 +385,9 @@ async function startServer() {
     const result = await fetchAndParse(url);
     console.log(`[parse-url] 完成: ${url} | hasError=${result.hasError}`);
 
-    // 始终返回 200，错误信息通过 hasError + text 传递
     return res.json(result);
   });
 
-  // ── 日志 ──────────────────────────────────────────────────
   app.get('/api/logs/:username', (req, res) => {
     const filePath = path.join('logs', `${req.params.username}.json`);
     try {
@@ -412,12 +410,24 @@ async function startServer() {
     }
   });
 
-  // ── Chat & Models 代理 ────────────────────────────────────
   const LM_BASE_URL = (
     process.env.LM_STUDIO_URL || 'http://127.0.0.1:1234/v1/chat/completions'
   ).replace('/chat/completions', '');
 
   app.post('/api/chat', async (req, res) => {
+    // 获取队列中的执行槽位
+    await acquireChatTaskSlot(req);
+    
+    let isSlotReleased = false;
+    const safeRelease = () => {
+      if (!isSlotReleased) {
+        isSlotReleased = true;
+        releaseChatTaskSlot();
+      }
+    };
+
+    req.on('close', safeRelease); 
+
     try {
       const upstream = await fetch(`${LM_BASE_URL}/chat/completions`, {
         method: 'POST',
@@ -425,33 +435,52 @@ async function startServer() {
         body: JSON.stringify(req.body),
       });
 
-      if (!upstream.ok && !req.body.stream)
+      if (!upstream.ok && !req.body.stream) {
+        safeRelease();
         return res.status(upstream.status).json({ error: await upstream.text() });
+      }
 
       if (req.body.stream) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('X-Accel-Buffering', 'no');
 
-        if (!upstream.body) return res.end();
+        if (!upstream.body) {
+          safeRelease();
+          return res.end();
+        }
         const reader = (upstream.body as unknown as ReadableStream<Uint8Array>).getReader();
 
         const pump = async () => {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done || res.writableEnded) break;
-            res.write(Buffer.from(value));
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done || res.writableEnded) break;
+              res.write(Buffer.from(value));
+            }
+          } finally {
+            res.end();
+            safeRelease();
           }
-          res.end();
         };
 
-        pump().catch(() => { if (!res.writableEnded) res.end(); });
-        req.on('close', () => reader.cancel().catch(() => {}));
+        pump().catch(() => { if (!res.writableEnded) res.end(); safeRelease(); });
+        req.on('close', () => {
+           reader.cancel().catch(() => {});
+           safeRelease();
+        });
       } else {
-        return res.json(await upstream.json());
+        const data = await upstream.json();
+        safeRelease();
+        return res.json(data);
       }
     } catch (error: any) {
-      return res.status(500).json({ error: error.message });
+      safeRelease();
+      if (!res.headersSent) {
+         return res.status(500).json({ error: error.message });
+      } else {
+         res.end();
+      }
     }
   });
 
@@ -464,7 +493,6 @@ async function startServer() {
     }
   });
 
-  // ── Vite / 静态文件 ───────────────────────────────────────
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
