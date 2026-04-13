@@ -4,6 +4,7 @@ import { Message, ChatSession, MessageFile } from '../types';
 import {
   Send, StopCircle, Paperclip, X, FileText, Brain,
   ChevronDown, ChevronRight, AlertTriangle, FileUp, Link, AlertCircle,
+  FileSpreadsheet // 新增：用于模板的图标
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -28,6 +29,11 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState(false);
   const [tempUrl, setTempUrl] = useState('');
+  
+  // ── 模板功能新增状态 ──
+  const [templateMode, setTemplateMode] = useState<string | null>(null);
+  const [templateFiles, setTemplateFiles] = useState<File[]>([]);
+
   const menuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -95,6 +101,186 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     }
   };
 
+  // ── 核心流式对话提取（复用） ─────────────────────────────
+  const processChatStream = async (currentMessages: Message[], assistantId: string) => {
+    abortControllerRef.current = new AbortController();
+    let assistantMsg = currentMessages.find(m => m.id === assistantId)!;
+
+    try {
+      let currentChars = 0;
+      const apiMessages: { role: string; content: string }[] = [];
+      const historyWindow = currentMessages
+        .filter((m) => m.id !== assistantId)
+        .slice(-15)
+        .reverse();
+
+      for (const m of historyWindow) {
+        let text = m.content;
+        if (m.files && m.files.length > 0) {
+          const hasTextFiles = m.files.some((f) => f.content);
+          if (hasTextFiles) {
+            text += `\n\n[附件数据]:\n`;
+            m.files.forEach((f) => {
+              if (f.content) {
+                text += `--- ${f.name} ---\n\`\`\`\n${f.content}\n\`\`\`\n`;
+              }
+            });
+          }
+        }
+
+        if (currentChars + text.length > MAX_CONTEXT_CHARS) {
+          const remainingSpace = MAX_CONTEXT_CHARS - currentChars;
+          if (apiMessages.length === 0) {
+            text = text.substring(0, remainingSpace) + '\n\n...[系统介入：为防止崩溃，本次请求已被动态裁剪尾部内容]...';
+            apiMessages.unshift({ role: m.role, content: text });
+            currentChars += text.length;
+          } else if (remainingSpace > 2000) {
+            text = text.substring(0, remainingSpace) + '\n\n...[系统介入：更早的历史记忆已被清理]...';
+            apiMessages.unshift({ role: m.role, content: text });
+            currentChars += text.length;
+          }
+          break;
+        } else {
+          apiMessages.unshift({ role: m.role, content: text });
+          currentChars += text.length;
+        }
+      }
+
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: selectedModel || 'local-model',
+          messages: apiMessages,
+          stream: true,
+        }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!response.ok) {
+        let errText = '';
+        try {
+          const errJson = await response.json();
+          errText = errJson.error?.message || errJson.error || JSON.stringify(errJson);
+        } catch { errText = await response.text(); }
+        throw new Error(errText || `请求失败，状态码: ${response.status}`);
+      }
+      if (!response.body) throw new Error('没有返回内容');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let done = false;
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        done = readerDone;
+        if (value) {
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n').filter((line) => line.trim() !== '');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.replace('data: ', '');
+              if (dataStr === '[DONE]') continue;
+              try {
+                const data = JSON.parse(dataStr);
+                const content = data.choices[0]?.delta?.content || '';
+                const reasoning = data.choices[0]?.delta?.reasoning_content || '';
+
+                if (content || reasoning) {
+                  if (reasoning) assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoning;
+                  if (content) assistantMsg.content += content;
+                  onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
+                }
+              } catch (e) {
+                console.error('解析流数据出错', e, line);
+              }
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        let friendlyError = error.message;
+        if (friendlyError.includes('context length') || friendlyError.includes('n_ctx') || friendlyError.includes('too large')) {
+          friendlyError = `模型负载过重（Context Overflow）。底层报错: ${friendlyError}\n\n**建议**：当前超长内容已被自动拦截隔离，您可以直接在下方输入框**继续提问**。`;
+        }
+        assistantMsg.content += `\n\n> ⚠️ **系统中断:** ${friendlyError}`;
+        onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
+      }
+    } finally {
+      setIsGenerating(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  // ── 模板提交流程 ──────────────────────────────────────────
+  const handleTemplateSubmit = async () => {
+    if (templateFiles.length === 0 || isGenerating) return;
+
+    const userMsgId = uuidv4();
+    const userMessage: Message = {
+      id: userMsgId,
+      role: 'user',
+      content: '【系统指令】正在通过 Python 脚本解析 Excel 答复文件并生成审核指令...',
+      timestamp: Date.now(),
+      files: templateFiles.map(f => ({ name: f.name, url: '', content: '' })),
+      isUploading: true,
+      progress: 0,
+    };
+
+    let currentMessages = [...session.messages, userMessage];
+    onUpdateMessages(currentMessages);
+    setIsGenerating(true);
+
+    try {
+      const formData = new FormData();
+      templateFiles.forEach(f => formData.append('files', f));
+
+      // 调用服务端特有的模板接口
+      const res = await fetch('/api/template/audit', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.details || err.error || '模板解析失败');
+      }
+
+      const data = await res.json();
+      const finalPrompt = data.prompt;
+
+      // 替换为最终拼接好 Excel 数据的 Prompt
+      currentMessages = currentMessages.map(m =>
+        m.id === userMsgId ? { ...m, content: finalPrompt, isUploading: false, progress: 100 } : m
+      );
+      onUpdateMessages(currentMessages);
+      
+      // 成功后清理模板上传状态
+      setTemplateMode(null);
+      setTemplateFiles([]);
+
+      // 发起大模型对话
+      const assistantId = uuidv4();
+      const assistantMsg: Message = {
+        id: assistantId, role: 'assistant', content: '', reasoningContent: '', timestamp: Date.now(),
+      };
+      currentMessages = [...currentMessages, assistantMsg];
+      onUpdateMessages(currentMessages);
+
+      await processChatStream(currentMessages, assistantId);
+
+    } catch (error: any) {
+      currentMessages = currentMessages.map((m) =>
+        m.id === userMsgId ? { ...m, isUploading: false, content: m.content + `\n\n> ⚠️ **系统提示:** ${error.message}` } : m
+      );
+      onUpdateMessages(currentMessages);
+      setIsGenerating(false);
+    }
+  };
+
+  // ── 常规提交流程 ──────────────────────────────────────────
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (
@@ -137,7 +323,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
     let uploadedMessageFiles: MessageFile[] = [];
     let parsedUrlFiles: MessageFile[] = [];
 
-    // ── 1. 文件上传 ──────────────────────────────────────────
+    // 文件上传
     if (currentFilesToUpload.length > 0) {
       try {
         const uploadResult = await new Promise<any>((resolve, reject) => {
@@ -158,9 +344,7 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
               resolve(JSON.parse(xhr.responseText));
-            } else {
-              reject(new Error('上传失败'));
-            }
+            } else { reject(new Error('上传失败')); }
           };
 
           xhr.onerror = () => reject(new Error('网络错误'));
@@ -171,21 +355,15 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
         uploadedMessageFiles = uploadResult.files.map((resItem: any) => {
           let text = resItem.text || '';
           let isTruncated = false;
-
           if (text.length > MAX_UPLOAD_LENGTH) {
-            text =
-              text.substring(0, MAX_UPLOAD_LENGTH) +
-              '\n\n...[⚠️ 前端提示：文件过大，后半部分已被舍弃]...';
+            text = text.substring(0, MAX_UPLOAD_LENGTH) + '\n\n...[⚠️ 前端提示：文件过大，后半部分已被舍弃]...';
             isTruncated = true;
           }
-
           return { name: resItem.name, url: resItem.url, content: text, isTruncated };
         });
       } catch (error) {
         currentMessages = currentMessages.map((m) =>
-          m.id === userMsgId
-            ? { ...m, isUploading: false, content: m.content + '\n\n> ⚠️ **系统提示:** 文件上传或解析失败' }
-            : m
+          m.id === userMsgId ? { ...m, isUploading: false, content: m.content + '\n\n> ⚠️ **系统提示:** 文件上传或解析失败' } : m
         );
         onUpdateMessages(currentMessages);
         setIsGenerating(false);
@@ -193,12 +371,10 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
       }
     }
 
-    // ── 1.5 网址抓取（浏览器优先 + 服务端兜底）────────────────
+    // 网址抓取
     if (hasUrls) {
       for (const url of allUrlsToParse) {
         let result: any = null;
-
-        // 第一步：浏览器端抓取
         console.log(`[URL抓取] 浏览器端尝试: ${url}`);
         const browserResult = await browserFetchUrl(url);
 
@@ -206,210 +382,46 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
           console.log(`[URL抓取] 浏览器端成功: ${url}`);
           result = browserResult;
         } else if (browserResult.errorMsg === 'CORS_BLOCKED') {
-          // CORS 拦截 → 服务端兜底
           console.log(`[URL抓取] CORS拦截，回退服务端: ${url}`);
           try {
-            const res = await fetch('/api/parse-url', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url }),
-            });
+            const res = await fetch('/api/parse-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
             const data = await res.json();
             result = { ...data, source: 'server' };
           } catch (apiErr: any) {
-            result = {
-              title: '接口请求失败',
-              text: `[⚠️ 系统日志：服务端接口调用失败，详情：${apiErr.message}]`,
-              url,
-              hasError: true,
-              source: 'server',
-            };
+            result = { title: '接口请求失败', text: `[⚠️ 系统日志：服务端调用失败，详情：${apiErr.message}]`, url, hasError: true, source: 'server' };
           }
         } else {
-          // 其他错误也尝试服务端兜底
           console.log(`[URL抓取] 浏览器端失败(${browserResult.errorMsg})，尝试服务端: ${url}`);
           try {
-            const res = await fetch('/api/parse-url', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ url }),
-            });
+            const res = await fetch('/api/parse-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
             const data = await res.json();
             result = data.hasError ? browserResult : { ...data, source: 'server' };
-          } catch {
-            result = browserResult;
-          }
+          } catch { result = browserResult; }
         }
 
-        // 截断超长内容
         let text: string = result.text || '';
         let isTruncated = false;
         if (!result.hasError && text.length > MAX_UPLOAD_LENGTH) {
-          text =
-            text.substring(0, MAX_UPLOAD_LENGTH) +
-            '\n\n...[⚠️ 前端提示：网页内容过大，后半部分已被舍弃]...';
+          text = text.substring(0, MAX_UPLOAD_LENGTH) + '\n\n...[⚠️ 前端提示：网页内容过大，后半部分已被舍弃]...';
           isTruncated = true;
         }
-
-        parsedUrlFiles.push({
-          name: result.title
-            ? result.hasError
-              ? result.title
-              : `网页: ${result.title}`
-            : url,
-          url,
-          content: text,
-          isTruncated,
-          hasError: result.hasError ?? false,
-        } as any);
+        parsedUrlFiles.push({ name: result.title ? (result.hasError ? result.title : `网页: ${result.title}`) : url, url, content: text, isTruncated, hasError: result.hasError ?? false } as any);
       }
     }
 
-    // 更新消息附件
     const allAttachments = [...uploadedMessageFiles, ...parsedUrlFiles];
     currentMessages = currentMessages.map((m) =>
-      m.id === userMsgId
-        ? { ...m, isUploading: false, progress: 100, files: allAttachments }
-        : m
+      m.id === userMsgId ? { ...m, isUploading: false, progress: 100, files: allAttachments } : m
     );
     onUpdateMessages(currentMessages);
 
-    // ── 2. AI 助理消息占位 ────────────────────────────────────
     const assistantId = uuidv4();
-    let assistantMsg: Message = {
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      reasoningContent: '',
-      timestamp: Date.now(),
-    };
-
+    let assistantMsg: Message = { id: assistantId, role: 'assistant', content: '', reasoningContent: '', timestamp: Date.now() };
     currentMessages = [...currentMessages, assistantMsg];
     onUpdateMessages(currentMessages);
-    abortControllerRef.current = new AbortController();
 
-    try {
-      // ── 3. 动态上下文装箱 ──────────────────────────────────
-      let currentChars = 0;
-      const apiMessages: { role: string; content: string }[] = [];
-      const historyWindow = currentMessages
-        .filter((m) => m.id !== assistantId)
-        .slice(-15)
-        .reverse();
-
-      for (const m of historyWindow) {
-        let text = m.content;
-        if (m.files && m.files.length > 0) {
-          const hasTextFiles = m.files.some((f) => f.content);
-          if (hasTextFiles) {
-            text += `\n\n[附件数据]:\n`;
-            m.files.forEach((f) => {
-              if (f.content) {
-                text += `--- ${f.name} ---\n\`\`\`\n${f.content}\n\`\`\`\n`;
-              }
-            });
-          }
-        }
-
-        if (currentChars + text.length > MAX_CONTEXT_CHARS) {
-          const remainingSpace = MAX_CONTEXT_CHARS - currentChars;
-          if (apiMessages.length === 0) {
-            text =
-              text.substring(0, remainingSpace) +
-              '\n\n...[系统介入：为防止崩溃，本次请求已被动态裁剪尾部内容]...';
-            apiMessages.unshift({ role: m.role, content: text });
-            currentChars += text.length;
-          } else if (remainingSpace > 2000) {
-            text =
-              text.substring(0, remainingSpace) +
-              '\n\n...[系统介入：更早的历史记忆已被清理]...';
-            apiMessages.unshift({ role: m.role, content: text });
-            currentChars += text.length;
-          }
-          break;
-        } else {
-          apiMessages.unshift({ role: m.role, content: text });
-          currentChars += text.length;
-        }
-      }
-
-      // ── 4. 发起对话请求 ────────────────────────────────────
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: selectedModel || 'local-model',
-          messages: apiMessages,
-          stream: true,
-        }),
-        signal: abortControllerRef.current.signal,
-      });
-
-      if (!response.ok) {
-        let errText = '';
-        try {
-          const errJson = await response.json();
-          errText = errJson.error?.message || errJson.error || JSON.stringify(errJson);
-        } catch {
-          errText = await response.text();
-        }
-        throw new Error(errText || `请求失败，状态码: ${response.status}`);
-      }
-      if (!response.body) throw new Error('没有返回内容');
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let done = false;
-
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        if (value) {
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n').filter((line) => line.trim() !== '');
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const dataStr = line.replace('data: ', '');
-              if (dataStr === '[DONE]') continue;
-              try {
-                const data = JSON.parse(dataStr);
-                const content = data.choices[0]?.delta?.content || '';
-                const reasoning = data.choices[0]?.delta?.reasoning_content || '';
-
-                if (content || reasoning) {
-                  if (reasoning)
-                    assistantMsg.reasoningContent =
-                      (assistantMsg.reasoningContent || '') + reasoning;
-                  if (content) assistantMsg.content += content;
-                  onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
-                }
-              } catch (e) {
-                console.error('解析流数据出错', e, line);
-              }
-            }
-          }
-        }
-      }
-    } catch (error: any) {
-      if (error.name !== 'AbortError') {
-        let friendlyError = error.message;
-        if (
-          friendlyError.includes('context length') ||
-          friendlyError.includes('n_ctx') ||
-          friendlyError.includes('too large')
-        ) {
-          friendlyError =
-            `模型负载过重（Context Overflow）。底层报错: ${friendlyError}\n\n` +
-            `**建议**：当前超长内容已被自动拦截隔离，您可以直接在下方输入框**继续提问**。`;
-        }
-        assistantMsg.content += `\n\n> ⚠️ **系统中断:** ${friendlyError}`;
-        onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
-      }
-    } finally {
-      setIsGenerating(false);
-      abortControllerRef.current = null;
-    }
+    // 调用提取的大模型交互逻辑
+    await processChatStream(currentMessages, assistantId);
   };
 
   return (
@@ -609,7 +621,23 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
 
       <div className="p-4 bg-[#1e1e2e] border-t border-gray-800 shrink-0">
         <div className="max-w-4xl mx-auto relative">
-          {(selectedFiles.length > 0 || selectedUrls.length > 0) && (
+          
+          {/* ── 新增：模板功能按钮组 ── */}
+          <div className="flex gap-2 mb-2">
+            <button
+              onClick={() => setTemplateMode(templateMode === 'audit_supplier' ? null : 'audit_supplier')}
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
+                templateMode === 'audit_supplier'
+                  ? 'bg-[#313244] text-blue-400 border border-b-0 border-gray-700 shadow-[0_4px_0_0_#313244] translate-y-[1px] relative z-10'
+                  : 'bg-transparent text-gray-400 hover:text-gray-200 border border-transparent'
+              }`}
+            >
+              <FileSpreadsheet size={16} />
+              审核供应商答复
+            </button>
+          </div>
+
+          {(selectedFiles.length > 0 || selectedUrls.length > 0) && !templateMode && (
             <div
               className="absolute -top-12 left-0 right-0 z-10 flex gap-2 overflow-x-auto pb-2"
               style={{ scrollbarWidth: 'none' }}
@@ -651,102 +679,158 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel }: C
 
           <form
             onSubmit={handleSubmit}
-            className={`relative flex items-end gap-2 bg-[#313244] border border-gray-700 p-2 transition-all shadow-sm ${
-              selectedFiles.length > 0 || selectedUrls.length > 0
-                ? 'rounded-b-xl rounded-tr-xl'
-                : 'rounded-xl'
-            } focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500`}
+            className={`relative flex items-end gap-2 transition-all shadow-sm ${
+              templateMode
+                ? 'bg-[#2a2b3d] border border-gray-700 rounded-b-xl rounded-tr-xl p-6 shadow-lg'
+                : `bg-[#313244] border border-gray-700 p-2 ${
+                    selectedFiles.length > 0 || selectedUrls.length > 0
+                      ? 'rounded-b-xl rounded-tr-xl'
+                      : 'rounded-xl'
+                  } focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500`
+            }`}
           >
-            <input
-              type="file"
-              multiple
-              ref={fileInputRef}
-              onChange={handleFileChange}
-              className="hidden"
-            />
+            {/* ── 模板激活时，渲染专用上传区 ── */}
+            {templateMode === 'audit_supplier' ? (
+              <div className="w-full flex flex-col items-center justify-center min-h-[120px] text-center animate-in fade-in zoom-in-95 duration-200">
+                <FileSpreadsheet size={40} className="text-gray-500 mb-3 opacity-50" />
+                <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格 (支持多选)</p>
+                <input
+                  type="file"
+                  multiple
+                  accept=".xls,.xlsx"
+                  onChange={(e) => {
+                    if (e.target.files) setTemplateFiles(Array.from(e.target.files));
+                  }}
+                  className="mb-4 text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-5 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer transition-colors"
+                />
+                
+                {templateFiles.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-6 justify-center max-w-lg">
+                    {templateFiles.map((f, i) => (
+                      <span key={i} className="text-xs bg-gray-800 text-gray-300 px-3 py-1.5 rounded-md border border-gray-700 flex items-center gap-1.5">
+                        <FileText size={12} className="text-blue-400"/>
+                        {f.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
 
-            <div className="relative shrink-0 mb-1 ml-1" ref={menuRef}>
-              <button
-                type="button"
-                onClick={() => setShowAttachMenu(!showAttachMenu)}
-                className={`p-2 transition-colors rounded-lg ${
-                  showAttachMenu
-                    ? 'bg-gray-700 text-blue-400'
-                    : 'text-gray-400 hover:text-blue-400 hover:bg-gray-800'
-                }`}
-                title="添加附件"
-              >
-                <Paperclip size={20} />
-              </button>
-
-              {showAttachMenu && (
-                <div className="absolute bottom-[calc(100%+8px)] left-0 w-36 bg-[#181825] border border-gray-700 rounded-lg shadow-xl overflow-hidden z-50">
+                <div className="flex gap-3">
                   <button
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-300 hover:bg-[#313244] hover:text-white transition-colors"
+                    onClick={() => { setTemplateMode(null); setTemplateFiles([]); }}
+                    className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
                   >
-                    <FileUp size={16} />
-                    <span>上传文档</span>
+                    取消
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setShowUrlModal(true);
-                      setShowAttachMenu(false);
-                    }}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-300 hover:bg-[#313244] hover:text-white transition-colors border-t border-gray-700/50"
+                    onClick={handleTemplateSubmit}
+                    disabled={templateFiles.length === 0 || isGenerating}
+                    className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
                   >
-                    <Link size={16} />
-                    <span>添加网址</span>
+                    提取并开始审核
                   </button>
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              // ── 常规模式：保留原来的输入框和附件功能 ──
+              <>
+                <input
+                  type="file"
+                  multiple
+                  ref={fileInputRef}
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
 
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSubmit(e);
-                }
-              }}
-              placeholder="输入消息..."
-              className="w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none"
-              rows={1}
-            />
+                <div className="relative shrink-0 mb-1 ml-1" ref={menuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowAttachMenu(!showAttachMenu)}
+                    className={`p-2 transition-colors rounded-lg ${
+                      showAttachMenu
+                        ? 'bg-gray-700 text-blue-400'
+                        : 'text-gray-400 hover:text-blue-400 hover:bg-gray-800'
+                    }`}
+                    title="添加附件"
+                  >
+                    <Paperclip size={20} />
+                  </button>
 
-            <div className="flex shrink-0 mb-1 mr-1">
-              {isGenerating ? (
-                <button
-                  type="button"
-                  onClick={handleStop}
-                  className="p-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors"
-                >
-                  <StopCircle size={20} />
-                </button>
-              ) : (
-                <button
-                  type="submit"
-                  disabled={
-                    !input.trim() &&
-                    selectedFiles.length === 0 &&
-                    selectedUrls.length === 0
-                  }
-                  className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  <Send size={20} />
-                </button>
-              )}
-            </div>
+                  {showAttachMenu && (
+                    <div className="absolute bottom-[calc(100%+8px)] left-0 w-36 bg-[#181825] border border-gray-700 rounded-lg shadow-xl overflow-hidden z-50">
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-300 hover:bg-[#313244] hover:text-white transition-colors"
+                      >
+                        <FileUp size={16} />
+                        <span>上传文档</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowUrlModal(true);
+                          setShowAttachMenu(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-300 hover:bg-[#313244] hover:text-white transition-colors border-t border-gray-700/50"
+                      >
+                        <Link size={16} />
+                        <span>添加网址</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSubmit(e);
+                    }
+                  }}
+                  placeholder="输入消息..."
+                  className="w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none"
+                  rows={1}
+                />
+
+                <div className="flex shrink-0 mb-1 mr-1">
+                  {isGenerating ? (
+                    <button
+                      type="button"
+                      onClick={handleStop}
+                      className="p-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors"
+                    >
+                      <StopCircle size={20} />
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={
+                        !input.trim() &&
+                        selectedFiles.length === 0 &&
+                        selectedUrls.length === 0
+                      }
+                      className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <Send size={20} />
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </form>
 
-          <div className="text-center mt-2 text-xs text-gray-500">
-            按 Enter 发送。目前上下文长度为120k，单次对话只能处理10万字以下数据
-          </div>
+          {/* 提示文案隐藏在模板模式下 */}
+          {!templateMode && (
+            <div className="text-center mt-2 text-xs text-gray-500">
+              按 Enter 发送。目前上下文长度为120k，单次对话只能处理10万字以下数据
+            </div>
+          )}
         </div>
       </div>
 
