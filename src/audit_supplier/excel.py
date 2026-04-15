@@ -56,11 +56,17 @@ def extract_excels_from_email(file_path):
                 try:
                     if filename.lower().endswith('.csv'):
                         df = pd.read_csv(io.BytesIO(payload))
+                        md_outputs.append(format_df_to_md(df, filename, f"邮件附件 ({os.path.basename(file_path)})"))
                     elif filename.lower().endswith('.xls'):
-                        df = pd.read_excel(io.BytesIO(payload), engine="xlrd")
+                        # 开启 sheet_name=None 以读取所有 sheet
+                        dfs = pd.read_excel(io.BytesIO(payload), engine="xlrd", sheet_name=None)
+                        for sheet_name, df in dfs.items():
+                            md_outputs.append(format_df_to_md(df, f"{filename} - {sheet_name}", f"邮件附件 ({os.path.basename(file_path)})"))
                     else:
-                        df = pd.read_excel(io.BytesIO(payload), engine="openpyxl")
-                    md_outputs.append(format_df_to_md(df, filename, f"邮件附件 ({os.path.basename(file_path)})"))
+                        # 开启 sheet_name=None 以读取所有 sheet
+                        dfs = pd.read_excel(io.BytesIO(payload), engine="openpyxl", sheet_name=None)
+                        for sheet_name, df in dfs.items():
+                            md_outputs.append(format_df_to_md(df, f"{filename} - {sheet_name}", f"邮件附件 ({os.path.basename(file_path)})"))
                 except Exception as e:
                     md_outputs.append(f"❌ 邮件附件提取失败 [{filename}]：{str(e)}")
 
@@ -75,11 +81,15 @@ def extract_excels_from_email(file_path):
                 try:
                     if filename.lower().endswith('.csv'):
                         df = pd.read_csv(io.BytesIO(payload))
+                        md_outputs.append(format_df_to_md(df, filename, f"邮件附件 ({os.path.basename(file_path)})"))
                     elif filename.lower().endswith('.xls'):
-                        df = pd.read_excel(io.BytesIO(payload), engine="xlrd")
+                        dfs = pd.read_excel(io.BytesIO(payload), engine="xlrd", sheet_name=None)
+                        for sheet_name, df in dfs.items():
+                            md_outputs.append(format_df_to_md(df, f"{filename} - {sheet_name}", f"邮件附件 ({os.path.basename(file_path)})"))
                     else:
-                        df = pd.read_excel(io.BytesIO(payload), engine="openpyxl")
-                    md_outputs.append(format_df_to_md(df, filename, f"邮件附件 ({os.path.basename(file_path)})"))
+                        dfs = pd.read_excel(io.BytesIO(payload), engine="openpyxl", sheet_name=None)
+                        for sheet_name, df in dfs.items():
+                            md_outputs.append(format_df_to_md(df, f"{filename} - {sheet_name}", f"邮件附件 ({os.path.basename(file_path)})"))
                 except Exception as e:
                     md_outputs.append(f"❌ 邮件附件提取失败 [{filename}]：{str(e)}")
                     
@@ -88,16 +98,10 @@ def extract_excels_from_email(file_path):
         try:
             import importlib.util
             
-            # 当前文件所在目录
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            # 定义查找候选列表
             candidate_paths = [
-                # 1. 精确向上两层目录寻找
                 os.path.abspath(os.path.join(current_dir, "../../parser.py")),
-                # 2. Node.js 运行的工作目录（通常是项目根目录）寻找
                 os.path.join(os.getcwd(), "parser.py"),
-                # 3. 如果是用编译后的 dist 目录运行，可能需要向上三层
                 os.path.abspath(os.path.join(current_dir, "../../../parser.py"))
             ]
             
@@ -111,12 +115,10 @@ def extract_excels_from_email(file_path):
                     break
             
             if parser_path:
-                # 动态导入找到的 parser.py
                 spec = importlib.util.spec_from_file_location("custom_parser", parser_path)
                 custom_parser = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(custom_parser)
                 
-                # 调用 parser.py 中的通用解析方法
                 fallback_text = custom_parser.parse_file_to_text(file_path)
                 return f"⚠️ 邮件 [{os.path.basename(file_path)}] 中未找到表格附件。已自动兜底提取正文及其他附件：\n\n{fallback_text}"
             else:
@@ -129,7 +131,7 @@ def extract_excels_from_email(file_path):
     return "\n".join(md_outputs)
 
 def read_single_excel(file_path):
-    """核心功能：无乱码读取单个中文 Excel（包含邮件中的附件）"""
+    """核心功能：无乱码读取单个中文 Excel（包含邮件中的附件）的所有 Sheet"""
     if not os.path.exists(file_path):
         return f"❌ 错误：文件不存在 → {file_path}"
     
@@ -141,16 +143,33 @@ def read_single_excel(file_path):
     
     try:
         if ext.endswith(".xlsx"):
-            df = pd.read_excel(file_path, engine="openpyxl")
+            # 开启 sheet_name=None 以读取所有 sheet，返回字典
+            dfs = pd.read_excel(file_path, engine="openpyxl", sheet_name=None)
+            md_outputs = []
+            for sheet_name, df in dfs.items():
+                md_outputs.append(format_df_to_md(df, f"{os.path.basename(file_path)} - {sheet_name}", file_path))
+            return "\n".join(md_outputs)
+            
         elif ext.endswith(".xls"):
             import xlrd
             xls_book = xlrd.open_workbook(file_path, formatting_info=False)
-            xls_sheet = xls_book.sheet_by_index(0)
-            data = []
-            for i in range(xls_sheet.nrows):
-                row = xls_sheet.row_values(i)
-                data.append(row)
-            df = pd.DataFrame(data[1:], columns=data[0]) if data else pd.DataFrame()
+            md_outputs = []
+            # 遍历并读取该旧版 xls 文件中的所有工作表
+            for sheet_idx in range(xls_book.nsheets):
+                xls_sheet = xls_book.sheet_by_index(sheet_idx)
+                data = []
+                for i in range(xls_sheet.nrows):
+                    row = xls_sheet.row_values(i)
+                    data.append(row)
+                
+                if data:
+                    df = pd.DataFrame(data[1:], columns=data[0])
+                    md_outputs.append(format_df_to_md(df, f"{os.path.basename(file_path)} - {xls_sheet.name}", file_path))
+                else:
+                    # 如果该 Sheet 为空，依旧返回空表格的说明信息
+                    md_outputs.append(format_df_to_md(pd.DataFrame(), f"{os.path.basename(file_path)} - {xls_sheet.name}", file_path))
+            return "\n".join(md_outputs)
+            
         elif ext.endswith(".csv"):
              for enc in ['utf-8', 'gbk', 'gb2312']:
                  try:
@@ -158,10 +177,10 @@ def read_single_excel(file_path):
                      break
                  except UnicodeDecodeError:
                      continue
+             return format_df_to_md(df, os.path.basename(file_path), file_path)
         else:
             return f"❌ 错误：仅支持 表格或邮件 格式 → {file_path}"
         
-        return format_df_to_md(df, os.path.basename(file_path), file_path)
     except Exception as e:
         return f"❌ 文件读取失败 [{file_path}]：{str(e)}"
     
