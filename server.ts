@@ -73,17 +73,14 @@ const axiosClient = axios.create({
 });
 
 // ─────────────────────────────────────────────────────────────
-// 编码自动检测（优先 BOM / meta charset / content-type，最后 UTF-8）
+// 编码自动检测
 // ─────────────────────────────────────────────────────────────
 function detectEncoding(buffer: Buffer, contentType: string): string {
-  // 1. Content-Type header
   const ctMatch = contentType.match(/charset=([^\s;]+)/i);
   if (ctMatch) return ctMatch[1].toLowerCase().replace(/['"]/g, '');
 
-  // 2. BOM
   if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return 'utf-8';
 
-  // 3. meta charset（前 4096 字节）
   const head = buffer.slice(0, 4096).toString('latin1');
   const metaMatch =
     head.match(/charset=["']?([a-zA-Z0-9\-_]+)/i) ||
@@ -94,7 +91,7 @@ function detectEncoding(buffer: Buffer, contentType: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 核心抓取函数（含重试）
+// 核心抓取函数
 // ─────────────────────────────────────────────────────────────
 interface FetchResult {
   title: string;
@@ -125,10 +122,8 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
       const status = response.status;
       const contentType: string = response.headers['content-type'] || '';
 
-      // HTTP 层失败
       if (status >= 400) {
         lastError = `HTTP ${status}`;
-        // 4xx 不重试（无意义），直接返回错误
         if (status >= 400 && status < 500) {
           return {
             title: '网页访问被拒',
@@ -138,11 +133,9 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
             errorMsg: `HTTP ${status}`,
           };
         }
-        // 5xx 继续重试
         continue;
       }
 
-      // 非文本类型
       if (
         contentType &&
         !contentType.includes('text/') &&
@@ -159,7 +152,6 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         };
       }
 
-      // 解码
       const buffer = Buffer.from(response.data);
       const encoding = detectEncoding(buffer, contentType);
       let html: string;
@@ -170,31 +162,20 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         html = buffer.toString('utf-8');
       }
 
-      // 用 cheerio 提取正文
       const $ = cheerio.load(html);
 
-      // 移除无用节点
       $('script, style, noscript, iframe, svg, canvas, nav, footer, header, aside, .ad, .ads, .advertisement, [class*="banner"], [id*="banner"]').remove();
 
-      // 提取标题
       const title =
         $('meta[property="og:title"]').attr('content') ||
         $('title').text().trim() ||
         url;
 
-      // 优先提取 article / main / .content 等语义节点
       let text = '';
       const contentSelectors = [
-        'article',
-        'main',
-        '[role="main"]',
-        '.article-content',
-        '.post-content',
-        '.entry-content',
-        '#content',
-        '.content',
-        '.article',
-        '.post',
+        'article', 'main', '[role="main"]', '.article-content',
+        '.post-content', '.entry-content', '#content', '.content',
+        '.article', '.post',
       ];
 
       for (const selector of contentSelectors) {
@@ -205,12 +186,10 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         }
       }
 
-      // fallback: 整个 body
       if (!text || text.trim().length < 100) {
         text = $('body').text();
       }
 
-      // 清理空白
       text = text
         .replace(/\t/g, ' ')
         .replace(/\r\n/g, '\n')
@@ -219,14 +198,12 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 
-      // SPA 检测
       if (
         text.length < 200 &&
         (html.includes('id="root"') || html.includes('id="app"'))
       ) {
         text +=
-          '\n\n[系统检测提示：该网页为前端动态渲染(SPA)，静态抓取无法获取实际内容。' +
-          '如需深度抓取，需在后端引入无头浏览器 Puppeteer。]';
+          '\n\n[系统检测提示：该网页为前端动态渲染(SPA)，静态抓取无法获取实际内容。如需深度抓取，需在后端引入无头浏览器 Puppeteer。]';
       }
 
       return { title: title.trim(), text, url, hasError: false };
@@ -237,21 +214,13 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
       lastError = `${code ? `[${code}] ` : ''}${msg}`;
       console.error(`抓取 [${url}] 第 ${attempt + 1} 次失败:`, err?.message ?? err);
 
-      // 最后一次重试失败才返回错误
       if (attempt === retries) {
         let friendlyMsg = lastError;
-
-        if (code === 'ECONNABORTED' || msg.includes('timeout')) {
-          friendlyMsg = `连接超时。目标网站可能屏蔽了爬虫，或当前服务器与目标网站网络不通。`;
-        } else if (code === 'ENOTFOUND') {
-          friendlyMsg = `DNS 解析失败。域名不存在或当前网络无法解析。`;
-        } else if (code === 'ECONNREFUSED') {
-          friendlyMsg = `连接被拒绝。目标服务器拒绝了连接请求。`;
-        } else if (code === 'ECONNRESET') {
-          friendlyMsg = `连接被重置。目标服务器强制断开了连接，可能存在防爬机制。`;
-        } else if (code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || code === 'CERT_HAS_EXPIRED') {
-          friendlyMsg = `SSL 证书问题。`;
-        }
+        if (code === 'ECONNABORTED' || msg.includes('timeout')) friendlyMsg = `连接超时。`;
+        else if (code === 'ENOTFOUND') friendlyMsg = `DNS 解析失败。`;
+        else if (code === 'ECONNREFUSED') friendlyMsg = `连接被拒绝。`;
+        else if (code === 'ECONNRESET') friendlyMsg = `连接被重置。`;
+        else if (code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || code === 'CERT_HAS_EXPIRED') friendlyMsg = `SSL 证书问题。`;
 
         return {
           title: '网页抓取失败',
@@ -261,18 +230,11 @@ async function fetchAndParse(url: string, retries = 2): Promise<FetchResult> {
           errorMsg: friendlyMsg,
         };
       }
-
-      // 重试前等待（指数退避）
       await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
     }
   }
 
-  return {
-    title: '网页抓取失败',
-    text: `[⚠️ 系统日志：未知错误，最后错误信息：${lastError}]`,
-    url,
-    hasError: true,
-  };
+  return { title: '网页抓取失败', text: `[⚠️ 系统日志：未知错误，最后错误信息：${lastError}]`, url, hasError: true };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -285,57 +247,50 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
-  // ── 文件上传 ──────────────────────────────────────────────
-  app.post(
-    '/api/upload',
-    (req, res, next) => {
-      upload.array('files', 10)(req, res, (err) => {
-        if (err) return res.status(400).json({ error: '上传失败', details: err.message });
-        next();
-      });
-    },
-    async (req, res) => {
-      if (!req.files || (req.files as Express.Multer.File[]).length === 0) {
-        return res.status(400).json({ error: '未上传文件' });
-      }
-
-      const files = req.files as Express.Multer.File[];
-      const results = [];
-
-      for (const file of files) {
-        const { path: filePath, filename } = file;
-        const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-
-        let text = '';
-        let parseError: string | undefined;
-
-        try {
-          const result = await parseFile(filePath, originalName);
-          text = result.text;
-          parseError = result.error;
-        } catch (unexpected: any) {
-          console.error(`文件 ${originalName} 解析异常:`, unexpected);
-          parseError = `系统异常: ${unexpected?.message ?? String(unexpected)}`;
-        }
-
-        if (parseError && !text) text = `【解析提示】${parseError}`;
-
-        results.push({
-          url: `/uploads/${filename}`,
-          name: originalName,
-          text,
-          ...(parseError ? { warning: parseError } : {}),
-        });
-      }
-
-      return res.json({ files: results });
+  app.post('/api/upload', (req, res, next) => {
+    upload.array('files', 10)(req, res, (err) => {
+      if (err) return res.status(400).json({ error: '上传失败', details: err.message });
+      next();
+    });
+  }, async (req, res) => {
+    if (!req.files || (req.files as Express.Multer.File[]).length === 0) {
+      return res.status(400).json({ error: '未上传文件' });
     }
-  );
 
-  // ── 模板处理接口 ───────────────────────────────────────────
+    const files = req.files as Express.Multer.File[];
+    const results = [];
+
+    for (const file of files) {
+      const { path: filePath, filename } = file;
+      const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+
+      let text = '';
+      let parseError: string | undefined;
+
+      try {
+        const result = await parseFile(filePath, originalName);
+        text = result.text;
+        parseError = result.error;
+      } catch (unexpected: any) {
+        console.error(`文件 ${originalName} 解析异常:`, unexpected);
+        parseError = `系统异常: ${unexpected?.message ?? String(unexpected)}`;
+      }
+
+      if (parseError && !text) text = `【解析提示】${parseError}`;
+
+      results.push({
+        url: `/uploads/${filename}`,
+        name: originalName,
+        text,
+        ...(parseError ? { warning: parseError } : {}),
+      });
+    }
+
+    return res.json({ files: results });
+  });
+
   app.post('/api/template/audit', async (req, res) => {
     const batchId = Date.now().toString();
-    // 创建一个临时批次文件夹，用于存放此次上传的 Excel 文件
     const batchDir = path.join(process.cwd(), 'uploads', 'templates', batchId);
     fs.mkdirSync(batchDir, { recursive: true });
 
@@ -361,10 +316,7 @@ async function startServer() {
           return res.status(500).json({ error: '服务端未找到对应的模板脚本文件，请确认是否已手动创建 src/scripts/audit_supplier 目录及相关文件。' });
         }
 
-        // 执行 Python 脚本，传入存储 Excel 的文件夹路径
         const { stdout } = await execPromise(`python "${scriptPath}" "${batchDir}"`);
-        
-        // 读取 prompt 模板并替换内容
         const promptTemplate = fs.readFileSync(promptPath, 'utf-8');
         const finalPrompt = promptTemplate.replace('{excel_content}', stdout);
 
@@ -376,7 +328,6 @@ async function startServer() {
     });
   });
 
-  // ── 网址解析（核心接口）────────────────────────────────────
   app.post('/api/parse-url', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: '缺少 URL' });
@@ -385,11 +336,9 @@ async function startServer() {
     const result = await fetchAndParse(url);
     console.log(`[parse-url] 完成: ${url} | hasError=${result.hasError}`);
 
-    // 始终返回 200，错误信息通过 hasError + text 传递
     return res.json(result);
   });
 
-  // ── 日志 ──────────────────────────────────────────────────
   app.get('/api/logs/:username', (req, res) => {
     const filePath = path.join('logs', `${req.params.username}.json`);
     try {
@@ -412,13 +361,28 @@ async function startServer() {
     }
   });
 
-  // ── Chat & Models 代理 ────────────────────────────────────
   const LM_BASE_URL = (
     process.env.LM_STUDIO_URL || 'http://127.0.0.1:1234/v1/chat/completions'
   ).replace('/chat/completions', '');
 
   app.post('/api/chat', async (req, res) => {
     try {
+      // 核心修改：实时获取 LM Studio 当前加载的模型，彻底同步状态
+      try {
+        const modelsRes = await fetch(`${LM_BASE_URL}/models`);
+        if (modelsRes.ok) {
+          const modelsData = await modelsRes.json();
+          if (modelsData?.data && modelsData.data.length > 0) {
+            req.body.model = modelsData.data[0].id;
+          } else {
+            req.body.model = 'local-model';
+          }
+        }
+      } catch (e) {
+        console.warn('获取当前模型状态失败，使用默认标识');
+        req.body.model = 'local-model';
+      }
+
       const upstream = await fetch(`${LM_BASE_URL}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -464,7 +428,6 @@ async function startServer() {
     }
   });
 
-  // ── Vite / 静态文件 ───────────────────────────────────────
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
