@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { Message, ChatSession, ModelInfo } from './types';
+import { Message, ChatSession } from './types';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import { Menu } from 'lucide-react';
@@ -8,11 +8,8 @@ import { Menu } from 'lucide-react';
 export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
-  // 全局生成状态，用来阻止多开对话框并发提交
   const [isGenerating, setIsGenerating] = useState(false);
 
   const [username, setUsername] = useState('');
@@ -53,27 +50,6 @@ export default function App() {
       }).catch(console.error);
     }
   }, [sessions, isLoggedIn, username]);
-
-  useEffect(() => {
-    const fetchModels = async () => {
-      if (!isLoggedIn) return;
-      try {
-        const res = await fetch('/api/models');
-        const data = await res.json();
-        
-        if (res.ok && data.data && data.data.length > 0) {
-          setModels(data.data);
-          setSelectedModel(data.data[0].id);
-        } else if (data.isConnectionRefused) {
-          setModels([{ id: 'lm-studio-not-connected', object: 'model', owned_by: 'system' }]);
-          setSelectedModel('lm-studio-not-connected');
-        }
-      } catch (error) {
-        console.error('获取模型失败', error);
-      }
-    };
-    fetchModels();
-  }, [isLoggedIn]);
 
   const createNewSession = () => {
     const newSession: ChatSession = {
@@ -199,31 +175,12 @@ export default function App() {
               {currentSession?.title || '本地大模型对话'}
             </h1>
           </div>
-          
-          <div className="flex items-center">
-            {models.length > 0 ? (
-              <select 
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="text-sm border-gray-700 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500 py-1.5 pl-3 pr-8 bg-[#313244] text-gray-200 outline-none"
-              >
-                {models.map(m => (
-                  <option key={m.id} value={m.id}>{m.id}</option>
-                ))}
-              </select>
-            ) : (
-              <span className="text-sm text-gray-400 bg-[#313244] px-3 py-1.5 rounded-md">
-                未找到模型
-              </span>
-            )}
-          </div>
         </header>
 
         {currentSession && (
           <ChatArea 
             session={currentSession}
             onUpdateMessages={(msgs) => updateSessionMessages(currentSession.id, msgs)}
-            selectedModel={selectedModel}
             isGenerating={isGenerating}
             setIsGenerating={setIsGenerating}
           />
