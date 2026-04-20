@@ -15,7 +15,6 @@ import { browserFetchUrl } from '../utils/browserFetch';
 interface ChatAreaProps {
   session: ChatSession;
   onUpdateMessages: (messages: Message[]) => void;
-  selectedModel: string;
   isGenerating: boolean;
   setIsGenerating: (val: boolean) => void;
 }
@@ -23,7 +22,7 @@ interface ChatAreaProps {
 const MAX_UPLOAD_LENGTH = 100000;
 const MAX_CONTEXT_CHARS = 80000;
 
-export default function ChatArea({ session, onUpdateMessages, selectedModel, isGenerating, setIsGenerating }: ChatAreaProps) {
+export default function ChatArea({ session, onUpdateMessages, isGenerating, setIsGenerating }: ChatAreaProps) {
   const [input, setInput] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [selectedUrls, setSelectedUrls] = useState<string[]>([]);
@@ -141,7 +140,6 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel, isG
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: selectedModel || 'local-model',
           messages: apiMessages,
           stream: true,
         }),
@@ -716,7 +714,8 @@ export default function ChatArea({ session, onUpdateMessages, selectedModel, isG
             {templateMode === 'audit_supplier' ? (
               <div className="w-full flex flex-col items-center justify-center min-h-[120px] text-center animate-in fade-in zoom-in-95 duration-200">
                 <FileSpreadsheet size={40} className="text-gray-500 mb-3 opacity-50" />
-                <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格或邮件 (支持多选)</p>
+                <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格或邮件</p>
+                <p className="text-gray-300 mb-4 text-sm">支持多选，建议单次处理内容不要太长，可分多次上传处理，模型单次处理文件越少结果越准确</p>
                 <input
                   type="file"
                   multiple
