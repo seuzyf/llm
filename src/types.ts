@@ -3,7 +3,13 @@ export interface MessageFile {
   name: string;
   url: string;
   content: string;
-  isTruncated?: boolean; // 新增：标记是否因为过长而被截断
+  isTruncated?: boolean; 
+  hasError?: boolean;
+}
+
+export interface MessageImage {
+  name: string;
+  base64: string; // 用于前端预览和直接发送给大模型的 Base64 字符串
 }
 
 export interface Message {
@@ -13,10 +19,11 @@ export interface Message {
   reasoningContent?: string;
   timestamp: number;
   files?: MessageFile[];
+  images?: MessageImage[]; // 新增：保存用户上传或粘贴的图片
   imageBase64?: string;
   isUploading?: boolean;
   progress?: number;
-  isTemplateCall?: boolean; // 新增：标记是否为特殊模板调用，用于隐藏原始prompt并渲染专属UI
+  isTemplateCall?: boolean; 
 }
 
 export interface ChatSession {
