@@ -9,11 +9,17 @@ interface ChatInputProps {
   onTemplateSubmit: (files: File[]) => void;
 }
 
+// 定义组件内部使用的图片暂存状态
+interface SelectedImageData {
+  file: File;
+  preview: string; // 本地秒开预览的 URL
+}
+
 export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: ChatInputProps) {
   const [input, setInput] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [selectedUrls, setSelectedUrls] = useState<string[]>([]);
-  const [selectedImages, setSelectedImages] = useState<MessageImage[]>([]);
+  const [selectedImages, setSelectedImages] = useState<SelectedImageData[]>([]);
   
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState(false);
@@ -22,9 +28,16 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
   const [templateMode, setTemplateMode] = useState<string | null>(null);
   const [templateFiles, setTemplateFiles] = useState<File[]>([]);
 
+  // 新增：图片压缩控制和处理状态
+  const [isCompressionEnabled, setIsCompressionEnabled] = useState(true);
+  const [isProcessing, setIsProcessing] = useState(false); 
+
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 统一的禁用状态：模型正在生成 or 正在处理图片上传
+  const isSubmitting = isGenerating || isProcessing;
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -43,6 +56,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // 辅助函数：读取原图 Base64（用户关闭压缩时调用）
   const readFileAsBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -52,7 +66,56 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     });
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 核心优化：利用 Canvas 在前端进行图片压缩、分辨率控制及防膨胀处理
+  const compressImage = (file: File, maxWidth = 1024, maxHeight = 1024, quality = 0.8): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const originalBase64 = event.target?.result as string;
+        const img = new Image();
+        img.src = originalBase64;
+        
+        img.onload = () => {
+          const width = img.width;
+          const height = img.height;
+
+          // 计算缩放比例，Math.min 配合 1 确保绝对不会放大图片 (哪怕原图只有 10x10)
+          const ratio = Math.min(maxWidth / width, maxHeight / height, 1);
+          const newWidth = Math.round(width * ratio);
+          const newHeight = Math.round(height * ratio);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = newWidth;
+          canvas.height = newHeight;
+          const ctx = canvas.getContext('2d');
+          
+          if (!ctx) {
+            resolve(originalBase64); // 降级处理
+            return;
+          }
+          
+          // 填充白色背景（防止透明 PNG 压缩为 JPEG 时变黑）
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, newWidth, newHeight);
+          
+          const newBase64 = canvas.toDataURL('image/jpeg', quality);
+          
+          // 核心拦截：如果压缩后的字符串体积反而比原图大（防膨胀），则原样返回原图的 base64
+          if (newBase64.length >= originalBase64.length) {
+            resolve(originalBase64);
+          } else {
+            resolve(newBase64);
+          }
+        };
+        img.onerror = reject;
+      };
+      reader.onerror = reject;
+    });
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const files = Array.from(e.target.files);
       const images = files.filter(f => f.type.startsWith('image/'));
@@ -62,30 +125,37 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         setSelectedFiles((prev) => [...prev, ...docs].slice(0, 10));
       }
 
-      for (const img of images) {
-        const base64 = await readFileAsBase64(img);
-        setSelectedImages((prev) => [...prev, { name: img.name, base64 }]);
+      // 秒速添加预览，不在这里阻塞进行压缩转换
+      if (images.length > 0) {
+        const newImages = images.map(file => ({
+          file,
+          preview: URL.createObjectURL(file)
+        }));
+        setSelectedImages((prev) => [...prev, ...newImages]);
       }
     }
     if (e.target) e.target.value = '';
     setShowAttachMenu(false);
   };
 
-  const handlePaste = async (e: React.ClipboardEvent) => {
+  const handlePaste = (e: React.ClipboardEvent) => {
     if (templateMode) return;
     const items = e.clipboardData?.items;
     if (!items) return;
 
     let hasImage = false;
-    const newImages: MessageImage[] = [];
+    const newImages: SelectedImageData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.startsWith('image/')) {
         hasImage = true;
         const file = items[i].getAsFile();
         if (file) {
-          const base64 = await readFileAsBase64(file);
-          newImages.push({ name: file.name || `pasted_image_${Date.now()}.png`, base64 });
+          const namedFile = new File([file], file.name || `pasted_image_${Date.now()}.png`, { type: file.type });
+          newImages.push({ 
+            file: namedFile, 
+            preview: URL.createObjectURL(namedFile) 
+          });
         }
       }
     }
@@ -105,15 +175,38 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() && selectedFiles.length === 0 && selectedUrls.length === 0 && selectedImages.length === 0) || isGenerating) return;
+    if ((!input.trim() && selectedFiles.length === 0 && selectedUrls.length === 0 && selectedImages.length === 0) || isSubmitting) return;
     
-    onSubmit(input, selectedFiles, selectedUrls, selectedImages);
-    setInput('');
-    setSelectedFiles([]);
-    setSelectedUrls([]);
-    setSelectedImages([]);
+    setIsProcessing(true); 
+    
+    try {
+      const finalImages: MessageImage[] = [];
+      // 在发送前，根据用户选择的开关状态统一处理图片
+      for (const imgData of selectedImages) {
+        let base64 = '';
+        if (isCompressionEnabled) {
+          base64 = await compressImage(imgData.file);
+        } else {
+          base64 = await readFileAsBase64(imgData.file);
+        }
+        finalImages.push({ name: imgData.file.name, base64 });
+      }
+
+      onSubmit(input, selectedFiles, selectedUrls, finalImages);
+
+      setInput('');
+      setSelectedFiles([]);
+      setSelectedUrls([]);
+      // 清理内存中的 blob URL
+      selectedImages.forEach(img => URL.revokeObjectURL(img.preview));
+      setSelectedImages([]);
+      // 发送完毕后自动恢复默认压缩选项
+      setIsCompressionEnabled(true);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const handleTemplateSubmitClick = () => {
@@ -128,7 +221,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         <div className="flex gap-2 mb-2">
           <button
             onClick={() => setTemplateMode(templateMode === 'audit_supplier' ? null : 'audit_supplier')}
-            disabled={isGenerating}
+            disabled={isSubmitting}
             className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
               templateMode === 'audit_supplier'
                 ? 'bg-[#313244] text-blue-400 border border-b-0 border-gray-700 shadow-[0_4px_0_0_#313244] translate-y-[1px] relative z-10'
@@ -140,17 +233,20 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           </button>
         </div>
 
-        {/* Gemini 样式的附件缩略图展示区 */}
+        {/* 附件缩略图展示区 */}
         {(selectedFiles.length > 0 || selectedUrls.length > 0 || selectedImages.length > 0) && !templateMode && (
           <div className="absolute -top-[72px] left-0 right-0 z-10 flex gap-3 overflow-x-auto pb-2 items-end" style={{ scrollbarWidth: 'none' }}>
             {selectedImages.map((img, index) => (
               <div key={`img-${index}`} className="relative group shrink-0 shadow-lg">
                 <div className="w-16 h-16 rounded-xl border border-gray-600 overflow-hidden bg-black/40">
-                  <img src={img.base64} alt="preview" className="w-full h-full object-cover" />
+                  <img src={img.preview} alt="preview" className="w-full h-full object-cover" />
                 </div>
                 <button
-                  onClick={() => setSelectedImages(prev => prev.filter((_, i) => i !== index))}
-                  disabled={isGenerating}
+                  onClick={() => {
+                    URL.revokeObjectURL(selectedImages[index].preview);
+                    setSelectedImages(prev => prev.filter((_, i) => i !== index));
+                  }}
+                  disabled={isSubmitting}
                   className="absolute -top-1.5 -right-1.5 bg-gray-700 text-gray-300 hover:text-white hover:bg-red-500 rounded-full p-0.5 shadow-md transition-colors disabled:opacity-50"
                 >
                   <X size={12} />
@@ -161,7 +257,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
               <div key={`file-${index}`} className="bg-[#313244] shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-600 text-sm shadow-lg mb-2">
                 <Paperclip size={14} className="text-blue-400" />
                 <span className="truncate max-w-[120px] text-gray-300">{file.name}</span>
-                <button onClick={() => setSelectedFiles(prev => prev.filter((_, i) => i !== index))} disabled={isGenerating} className="text-gray-400 hover:text-red-400 ml-1 disabled:opacity-50">
+                <button onClick={() => setSelectedFiles(prev => prev.filter((_, i) => i !== index))} disabled={isSubmitting} className="text-gray-400 hover:text-red-400 ml-1 disabled:opacity-50">
                   <X size={14} />
                 </button>
               </div>
@@ -170,7 +266,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
               <div key={`url-${index}`} className="bg-[#313244] shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-600 text-sm shadow-lg mb-2">
                 <LinkIcon size={14} className="text-blue-400" />
                 <span className="truncate max-w-[120px] text-gray-300" title={url}>{url}</span>
-                <button onClick={() => setSelectedUrls(prev => prev.filter((_, i) => i !== index))} disabled={isGenerating} className="text-gray-400 hover:text-red-400 ml-1 disabled:opacity-50">
+                <button onClick={() => setSelectedUrls(prev => prev.filter((_, i) => i !== index))} disabled={isSubmitting} className="text-gray-400 hover:text-red-400 ml-1 disabled:opacity-50">
                   <X size={14} />
                 </button>
               </div>
@@ -195,7 +291,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
               <FileSpreadsheet size={40} className="text-gray-500 mb-3 opacity-50" />
               <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格或邮件</p>
               <input
-                type="file" multiple disabled={isGenerating} accept=".xls,.xlsx,.xlsm,.xlsb,.csv,.msg"
+                type="file" multiple disabled={isSubmitting} accept=".xls,.xlsx,.xlsm,.xlsb,.csv,.msg"
                 onChange={(e) => {
                   if (e.target.files) setTemplateFiles(Array.from(e.target.files));
                 }}
@@ -213,8 +309,8 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
               )}
 
               <div className="flex gap-3">
-                <button type="button" onClick={() => { setTemplateMode(null); setTemplateFiles([]); }} disabled={isGenerating} className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors">取消</button>
-                <button type="button" onClick={handleTemplateSubmitClick} disabled={templateFiles.length === 0 || isGenerating} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 shadow-md">提取并开始审核</button>
+                <button type="button" onClick={() => { setTemplateMode(null); setTemplateFiles([]); }} disabled={isSubmitting} className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors">取消</button>
+                <button type="button" onClick={handleTemplateSubmitClick} disabled={templateFiles.length === 0 || isSubmitting} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 shadow-md">提取并开始审核</button>
               </div>
             </div>
           ) : (
@@ -224,7 +320,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                 multiple
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                disabled={isGenerating}
+                disabled={isSubmitting}
                 accept="image/*, .xls, .xlsx, .csv, .txt, .pdf, .doc, .docx" 
                 className="hidden"
               />
@@ -233,7 +329,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                 <button
                   type="button"
                   onClick={() => setShowAttachMenu(!showAttachMenu)}
-                  disabled={isGenerating}
+                  disabled={isSubmitting}
                   className={`p-2 transition-colors rounded-lg disabled:opacity-50 disabled:cursor-not-allowed ${
                     showAttachMenu ? 'bg-gray-700 text-blue-400' : 'text-gray-400 hover:text-blue-400 hover:bg-gray-800'
                   }`}
@@ -242,7 +338,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                   <Paperclip size={20} />
                 </button>
 
-                {showAttachMenu && !isGenerating && (
+                {showAttachMenu && !isSubmitting && (
                   <div className="absolute bottom-[calc(100%+8px)] left-0 w-36 bg-[#181825] border border-gray-700 rounded-lg shadow-xl overflow-hidden z-50">
                     <button
                       type="button"
@@ -280,16 +376,16 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                     handleSubmit(e);
                   }
                 }}
-                disabled={isGenerating}
-                placeholder={isGenerating ? "模型正在处理任务中，请稍候..." : "输入消息... 或直接截图 Ctrl+V 粘贴图片"}
-                className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                disabled={isSubmitting}
+                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : "输入消息... 或直接截图 Ctrl+V 粘贴图片"}
+                className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
                 rows={1}
               />
 
               <div className="flex shrink-0 mb-1 mr-1">
                 <button
                   type="submit"
-                  disabled={isGenerating || (!input.trim() && selectedFiles.length === 0 && selectedUrls.length === 0 && selectedImages.length === 0)}
+                  disabled={isSubmitting || (!input.trim() && selectedFiles.length === 0 && selectedUrls.length === 0 && selectedImages.length === 0)}
                   className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <Send size={20} />
@@ -299,9 +395,40 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           )}
         </form>
 
+        {/* 底部信息与图片压缩控制区 */}
         {!templateMode && (
-          <div className="text-center mt-2 text-xs text-gray-500">
-            按 Enter 发送，或直接截屏粘贴图片。目前单次对话只能处理10万字以下数据
+          <div className="flex justify-between items-center mt-2 px-1">
+            <div className="text-xs text-gray-500">
+              按 Enter 发送，或直接截屏粘贴图片。目前单次对话只能处理10万字以下数据
+            </div>
+            
+            {/* 只有在包含图片时才显示压缩控制开关 */}
+            {selectedImages.length > 0 && (
+              <div className="flex items-center gap-1.5 text-xs animate-in fade-in duration-300">
+                <input
+                  type="checkbox"
+                  id="compressToggle"
+                  checked={isCompressionEnabled}
+                  disabled={isSubmitting}
+                  onChange={(e) => {
+                    const isChecked = e.target.checked;
+                    // 如果用户想要取消勾选，进行安全提醒
+                    if (!isChecked) {
+                      const confirm = window.confirm('⚠️ 性能警告\n\n取消压缩将直接发送原图，这会极大增加本地大模型的解析耗时（每张图可能增加数十秒）和显存占用。\n\n确定要发送原图吗？');
+                      if (!confirm) return; // 用户取消则保持原状
+                    }
+                    setIsCompressionEnabled(isChecked);
+                  }}
+                  className="rounded border-gray-600 bg-[#313244] text-blue-500 focus:ring-blue-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                <label 
+                  htmlFor="compressToggle" 
+                  className={`cursor-pointer transition-colors ${!isCompressionEnabled ? 'text-yellow-500 font-medium' : 'text-gray-400 hover:text-gray-300'}`}
+                >
+                  {isCompressionEnabled ? '已开启图片压缩' : '发送原图 (将导致缓慢)'}
+                </label>
+              </div>
+            )}
           </div>
         )}
       </div>
