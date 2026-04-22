@@ -33,6 +33,8 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
 
       for (const m of historyWindow) {
         let text = m.content;
+        
+        // 挂载普通文档内容
         if (m.files && m.files.length > 0 && !m.isTemplateCall) {
           const hasTextFiles = m.files.some((f) => f.content);
           if (hasTextFiles) {
@@ -45,30 +47,30 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
           }
         }
 
-        // 构造发送给后端的结构
-        let msgPayload: any = { role: m.role, content: text };
-        
-        // 如果包含图片，组装到 api 请求中（供您的 LM Studio sdk 使用）
-        if (m.images && m.images.length > 0) {
-          msgPayload.images = m.images.map(img => img.base64);
-        }
-
+        // 裁切超长文本
         if (currentChars + text.length > MAX_CONTEXT_CHARS) {
           const remainingSpace = MAX_CONTEXT_CHARS - currentChars;
           if (apiMessages.length === 0) {
-            msgPayload.content = text.substring(0, remainingSpace) + '\n\n...[系统介入：为防止崩溃，本次请求已被动态裁剪尾部内容]...';
-            apiMessages.unshift(msgPayload);
-            currentChars += msgPayload.content.length;
+            text = text.substring(0, remainingSpace) + '\n\n...[系统介入：为防止崩溃，本次请求已被动态裁剪尾部内容]...';
           } else if (remainingSpace > 2000) {
-            msgPayload.content = text.substring(0, remainingSpace) + '\n\n...[系统介入：更早的历史记忆已被清理]...';
-            apiMessages.unshift(msgPayload);
-            currentChars += msgPayload.content.length;
+            text = text.substring(0, remainingSpace) + '\n\n...[系统介入：更早的历史记忆已被清理]...';
           }
-          break;
-        } else {
-          apiMessages.unshift(msgPayload);
-          currentChars += text.length;
         }
+
+        currentChars += text.length;
+
+        // 核心修改点：如果包含图片，转换为标准多模态支持的数组格式
+        if (m.images && m.images.length > 0) {
+          const contentArray: any[] = [{ type: 'text', text: text }];
+          m.images.forEach(img => {
+            contentArray.push({ type: 'image_url', image_url: { url: img.base64 } });
+          });
+          apiMessages.unshift({ role: m.role, content: contentArray });
+        } else {
+          apiMessages.unshift({ role: m.role, content: text });
+        }
+
+        if (currentChars > MAX_CONTEXT_CHARS) break;
       }
 
       const response = await fetch('/api/chat', {
