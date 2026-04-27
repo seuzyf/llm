@@ -106,8 +106,21 @@ def parse_ppt(file_path, display_name, parse_callback):
 
                 text_runs = []
                 for shape in slide.shapes:
+                    # 1. 提取普通文本框文字
                     if hasattr(shape, "text") and shape.text.strip():
                         text_runs.append(shape.text.strip())
+                    # 2. 提取表格文字
+                    elif shape.has_table:
+                        for row in shape.table.rows:
+                            row_cells = []
+                            for cell in row.cells:
+                                # 提取单元格文本并替换内部换行符，保持单行结构
+                                cell_text = cell.text.strip().replace('\n', ' ')
+                                row_cells.append(cell_text)
+                            # 如果该行有任何内容，则以 " | " 分隔符连接并加入结果中
+                            if any(row_cells):
+                                text_runs.append(" | ".join(row_cells))
+
                 if text_runs:
                     slide_parts.append("\n".join(text_runs))
 
