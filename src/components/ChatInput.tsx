@@ -399,7 +399,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         {!templateMode && (
           <div className="flex justify-between items-center mt-2 px-1">
             <div className="text-xs text-gray-500">
-              按 Enter 发送，或直接截屏粘贴图片。目前单次对话只能处理10万字以下数据
+              按 Enter 发送，或直接截屏粘贴图片。目前单次对话只能处理 128k 以下数据
             </div>
             
             {/* 只有在包含图片时才显示压缩控制开关 */}
