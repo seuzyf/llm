@@ -13,8 +13,9 @@ interface ChatAreaProps {
   setIsGenerating: (val: boolean) => void;
 }
 
-const MAX_UPLOAD_LENGTH = 100000;
-const MAX_CONTEXT_CHARS = 80000;
+// 适配 128k 上下文的限制
+const MAX_UPLOAD_LENGTH = 128000;
+const MAX_CONTEXT_CHARS = 120000;
 
 export default function ChatArea({ session, onUpdateMessages, isGenerating, setIsGenerating }: ChatAreaProps) {
   const abortControllerRef = useRef<AbortController | null>(null);
