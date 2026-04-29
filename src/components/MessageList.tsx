@@ -175,6 +175,10 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
                         }
                       }
 
+                      // 在此处将所有的 <br>, <br/>, <br /> 等替换为一个空格
+                      displayContent = displayContent.replace(/<br\s*\/?>/gi, ' ');
+                      displayReasoning = displayReasoning.replace(/<br\s*\/?>/gi, ' ');
+
                       return (
                         <>
                           {displayReasoning && (
