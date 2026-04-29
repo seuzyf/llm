@@ -11,7 +11,7 @@ import iconv from 'iconv-lite';
 import { parseFile } from './src/fileParser.js';
 import { exec } from 'child_process';
 import util from 'util';
-import crypto from 'crypto'; // 新增：用于计算文件 MD5
+import crypto from 'crypto';
 
 const execPromise = util.promisify(exec);
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -35,7 +35,7 @@ interface VectorRecord {
   content: string;
   vector: number[];
   url?: string;
-  fileHash?: string; // 新增：用于文件秒传和去重
+  fileHash?: string;
 }
 
 let vectorDB: VectorRecord[] = [];
@@ -58,7 +58,6 @@ function saveVectorDB() {
 
 loadVectorDB();
 
-// 计算文件的 MD5 值
 function getFileHash(filePath: string): string {
   try {
     const fileBuffer = fs.readFileSync(filePath);
@@ -70,7 +69,7 @@ function getFileHash(filePath: string): string {
   }
 }
 
-function chunkText(text: string, chunkSize = 2500, overlap = 200): string[] {
+function chunkText(text: string, chunkSize = 2000, overlap = 100): string[] {
   const chunks: string[] = [];
   let start = 0;
   while (start < text.length) {
@@ -127,9 +126,9 @@ async function getEmbeddings(inputs: string[]): Promise<number[][]> {
     return [];
   }
 }
-// 在 server.ts 顶部引入区下方，新增一个极轻量的同步缓存
+
 const SYNC_CACHE_PATH = path.join(process.cwd(), 'logs', 'syncCache.json');
-let syncCache: Record<string, number> = {}; // 记录格式: { "文件名": 最后修改时间戳 }
+let syncCache: Record<string, number> = {}; 
 
 if (fs.existsSync(SYNC_CACHE_PATH)) {
   try {
@@ -152,24 +151,20 @@ async function syncPublicFolder() {
     const filePath = path.join(publicDir, filename);
     if (filename.startsWith('.') || !fs.statSync(filePath).isFile()) continue;
 
-    // 核心性能优化：瞬间获取文件的最后修改时间
     const stat = fs.statSync(filePath);
     const mtime = stat.mtimeMs;
 
-    // 如果文件修改时间与缓存一致，说明文件毫无变化，直接跳过！(连 MD5 都不用算)
     if (syncCache[filename] === mtime) continue;
 
     const fileUrl = `/uploads/public/${filename}`;
-    const fileHash = getFileHash(filePath); // 只有确认文件变动了，才去读内存算 MD5
+    const fileHash = getFileHash(filePath); 
 
     if (vectorDB.some(v => v.namespace === 'public' && v.fileHash === fileHash)) {
-      // 内容没变（比如只是重命名或者单纯 touch 了一下），更新缓存后跳过
       syncCache[filename] = mtime;
       cacheUpdated = true;
       continue;
     }
 
-    // 清理可能存在的同名旧版向量
     vectorDB = vectorDB.filter(v => !(v.namespace === 'public' && v.name === filename && v.type === 'file'));
 
     console.log(`[Sync] 发现新加入或已修改的公共文件: ${filename}，准备处理...`);
@@ -202,7 +197,6 @@ async function syncPublicFolder() {
             console.log(`[Sync] 公共文件索引完成: ${filename}`);
             saveVectorDB();
             
-            // 向量建立成功后，安全写入缓存
             syncCache[filename] = mtime;
             fs.writeFileSync(SYNC_CACHE_PATH, JSON.stringify(syncCache));
           }
@@ -220,8 +214,6 @@ async function syncPublicFolder() {
   
   console.log(`[Sync] 同步任务调度完成，共发现 ${newlyIndexedCount} 个待处理的变动文件。\n`);
 }
-
-// ===================================================================
 
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
@@ -334,10 +326,8 @@ async function startServer() {
         try { fs.copyFileSync(file.path, path.join('uploads', 'public', file.filename)); } catch(e) {}
       }
 
-      // 获取当前上传文件的 MD5 值
       const currentFileHash = getFileHash(file.path);
       
-      // 判断专属库和公共库中是否已经存在完全相同的文件
       const isPrivateDuplicate = vectorDB.some(v => v.namespace === username && v.fileHash === currentFileHash);
       const isPublicDuplicate = isPublic && vectorDB.some(v => v.namespace === 'public' && v.fileHash === currentFileHash);
 
@@ -363,7 +353,6 @@ async function startServer() {
           if (isPrivateDuplicate && (!isPublic || isPublicDuplicate)) {
              console.log(`[Upload API] ⚡ 文件 ${originalName} (MD5匹配) 已存在，跳过知识库重复构建。`);
           } else {
-             // 核心逻辑：如果名字相同但是 MD5 不同，说明用户更新了文件，删除同名的旧版向量
              const hasOldPrivateVersion = vectorDB.some(v => v.namespace === username && v.name === originalName && v.type === 'file');
              if (hasOldPrivateVersion) {
                console.log(`[Upload API] ♻️ 文件 ${originalName} 已更新，正在清理旧版知识库向量...`);
@@ -432,31 +421,60 @@ async function startServer() {
     const { query, username } = req.body;
     if (!query || !username) return res.status(400).json({ error: '缺少参数' });
     
+    console.log(`\n[RAG Backend] 收到检索请求 | 提问: "${query}" | 空间: ${username}`);
+
     const queryEmbs = await getEmbeddings([query]);
-    if (!queryEmbs || queryEmbs.length === 0) return res.json({ citations: [] });
+    if (!queryEmbs || queryEmbs.length === 0) {
+      console.log(`[RAG Backend] ❌ 失败: 无法获取提问的向量表示，请检查 Embedding 模型`);
+      return res.json({ citations: [] });
+    }
     
     const queryVec = queryEmbs[0];
-    const targetNamespaces = [username, `${username}_chat`, 'public'];
-    const candidates = vectorDB.filter(v => targetNamespaces.includes(v.namespace));
     
-    const results = candidates.map(c => ({
-      ...c,
-      score: cosineSimilarity(queryVec, c.vector)
-    }));
+    const privateNamespaces = [username, `${username}_chat`];
+    const privateCandidates = vectorDB.filter(v => privateNamespaces.includes(v.namespace));
+    const publicCandidates = vectorDB.filter(v => v.namespace === 'public');
+    
+    console.log(`[RAG Backend] 候选池基数 | 私有库: ${privateCandidates.length} 条 | 公共库: ${publicCandidates.length} 条`);
 
-    results.sort((a, b) => b.score - a.score);
+    const rankCandidates = (candidates: VectorRecord[]) => {
+      const scored = candidates.map(c => ({ ...c, score: cosineSimilarity(queryVec, c.vector) }));
+      // 临时打印最高分，方便调试阈值
+      if (scored.length > 0) {
+        const highest = [...scored].sort((a, b) => b.score - a.score)[0];
+        console.log(`[RAG Backend] 该池最高相似度得分: ${highest.score.toFixed(4)}`);
+      }
+      
+      return scored.filter(c => c.score > 0.5).sort((a, b) => b.score - a.score);
+    };
 
-    const citations = [];
+    const privateResults = rankCandidates(privateCandidates);
+    const publicResults = rankCandidates(publicCandidates);
+
+    console.log(`[RAG Backend] 超过 0.4 阈值的命中数 | 私有: ${privateResults.length} | 公共: ${publicResults.length}`);
+
+    const citations: any[] = [];
     const seen = new Set();
     
-    for (const r of results) {
-      if (r.score > 0.4 && !seen.has(r.content)) {
+    for (const r of privateResults) {
+      if (!seen.has(r.content)) {
         seen.add(r.content);
         citations.push({ id: r.id, type: r.type, name: r.name, content: r.content, score: r.score, url: r.url });
         if (citations.length >= 5) break;
       }
     }
     
+    if (citations.length < 5) {
+      for (const r of publicResults) {
+        if (!seen.has(r.content)) {
+          seen.add(r.content);
+          citations.push({ id: r.id, type: r.type, name: `[公共库] ${r.name}`, content: r.content, score: r.score, url: r.url });
+          if (citations.length >= 5) break;
+        }
+      }
+    }
+    
+    console.log(`[RAG Backend] ✅ 最终返回给前端 ${citations.length} 条检索片段\n`);
     return res.json({ citations });
   });
 
@@ -483,8 +501,13 @@ async function startServer() {
         const ns = `${username}_chat`;
         let tasks: { msgId: string, name: string, content: string }[] = [];
         
+        // 1. 收集当前 Payload 中所有合法且存活的 msgId
+        const validMsgIds = new Set<string>();
+        
         logs.forEach((session: any) => {
           session.messages.forEach((msg: any) => {
+            validMsgIds.add(msg.id); // 登记存活的节点
+            
             if ((msg.role === 'user' || msg.role === 'assistant') && msg.content) {
               const currentContent = msg.content.substring(0, 1000);
               const chunksForMsg = vectorDB.filter(v => v.sourceId === msg.id);
@@ -498,8 +521,26 @@ async function startServer() {
           });
         });
 
-        if (tasks.length === 0) return;
+        // 2. 核心修复：全库扫描，清理掉属于该用户但已经被删除的“幽灵对话向量”
+        const beforeLen = vectorDB.length;
+        vectorDB = vectorDB.filter(v => {
+          // 如果是当前用户的对话历史向量
+          if (v.namespace === ns && v.type === 'chat') {
+            // 只有当它的 sourceId 依然在存活名单里时，才予以保留
+            return v.sourceId && validMsgIds.has(v.sourceId);
+          }
+          // 其他命名空间（如 public）或文件类的向量不受影响
+          return true;
+        });
 
+        if (vectorDB.length !== beforeLen) {
+          console.log(`[VectorDB] ♻️ 同步清理了 ${beforeLen - vectorDB.length} 条已删除的对话幽灵数据`);
+        }
+
+        // 如果既没有新任务，又没有发生清理，直接退出，避免不必要的磁盘 I/O
+        if (tasks.length === 0 && vectorDB.length === beforeLen) return;
+
+        // 3. 执行常规的新增/更新任务
         for (let i = 0; i < tasks.length; i += 10) {
           const batch = tasks.slice(i, i + 10);
           const embs = await getEmbeddings(batch.map(t => t.content));
@@ -518,9 +559,10 @@ async function startServer() {
             });
           });
         }
+        
         saveVectorDB();
       });
-    }, 3000);
+    }, 3005);
     
     return res.json({ success: true });
   });
