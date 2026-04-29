@@ -314,7 +314,7 @@ async function fetchAndParse(url: string, retries = 2): Promise<any> {
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3005;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '50mb' }));
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
@@ -520,7 +520,7 @@ async function startServer() {
         }
         saveVectorDB();
       });
-    }, 3005);
+    }, 3000);
     
     return res.json({ success: true });
   });
