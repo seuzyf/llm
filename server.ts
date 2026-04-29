@@ -70,7 +70,7 @@ function getFileHash(filePath: string): string {
   }
 }
 
-function chunkText(text: string, chunkSize = 500, overlap = 50): string[] {
+function chunkText(text: string, chunkSize = 2500, overlap = 200): string[] {
   const chunks: string[] = [];
   let start = 0;
   while (start < text.length) {
