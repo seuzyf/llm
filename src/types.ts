@@ -9,7 +9,16 @@ export interface MessageFile {
 
 export interface MessageImage {
   name: string;
-  base64: string; // 用于前端预览和直接发送给大模型的 Base64 字符串
+  base64: string; 
+}
+
+export interface Citation {
+  id: string;
+  type: 'file' | 'chat';
+  name: string;
+  url?: string;
+  content: string;
+  score?: number;
 }
 
 export interface Message {
@@ -19,11 +28,12 @@ export interface Message {
   reasoningContent?: string;
   timestamp: number;
   files?: MessageFile[];
-  images?: MessageImage[]; // 新增：保存用户上传或粘贴的图片
+  images?: MessageImage[]; 
   imageBase64?: string;
   isUploading?: boolean;
   progress?: number;
   isTemplateCall?: boolean; 
+  citations?: Citation[]; 
 }
 
 export interface ChatSession {
