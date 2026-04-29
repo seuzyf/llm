@@ -1,18 +1,17 @@
 // src/components/ChatInput.tsx
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Paperclip, X, FileUp, Link as LinkIcon, FileSpreadsheet, FileText, Image as ImageIcon } from 'lucide-react';
+import { Send, Paperclip, X, FileUp, Link as LinkIcon, FileSpreadsheet, FileText, Image as ImageIcon, Database } from 'lucide-react';
 import { MessageImage } from '../types';
 
 interface ChatInputProps {
   isGenerating: boolean;
-  onSubmit: (input: string, files: File[], urls: string[], images: MessageImage[]) => void;
+  onSubmit: (input: string, files: File[], urls: string[], images: MessageImage[], isRAGEnabled: boolean, isPublic: boolean) => void;
   onTemplateSubmit: (files: File[]) => void;
 }
 
-// 定义组件内部使用的图片暂存状态
 interface SelectedImageData {
   file: File;
-  preview: string; // 本地秒开预览的 URL
+  preview: string; 
 }
 
 export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: ChatInputProps) {
@@ -28,15 +27,16 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
   const [templateMode, setTemplateMode] = useState<string | null>(null);
   const [templateFiles, setTemplateFiles] = useState<File[]>([]);
 
-  // 新增：图片压缩控制和处理状态
   const [isCompressionEnabled, setIsCompressionEnabled] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false); 
+  
+  const [isRAGEnabled, setIsRAGEnabled] = useState(false);
+  const [isPublic, setIsPublic] = useState(false);
 
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // 统一的禁用状态：模型正在生成 or 正在处理图片上传
   const isSubmitting = isGenerating || isProcessing;
 
   useEffect(() => {
@@ -56,7 +56,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // 辅助函数：读取原图 Base64（用户关闭压缩时调用）
   const readFileAsBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -66,7 +65,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     });
   };
 
-  // 核心优化：利用 Canvas 在前端进行图片压缩、分辨率控制及防膨胀处理
   const compressImage = (file: File, maxWidth = 1024, maxHeight = 1024, quality = 0.8): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -79,8 +77,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         img.onload = () => {
           const width = img.width;
           const height = img.height;
-
-          // 计算缩放比例，Math.min 配合 1 确保绝对不会放大图片 (哪怕原图只有 10x10)
           const ratio = Math.min(maxWidth / width, maxHeight / height, 1);
           const newWidth = Math.round(width * ratio);
           const newHeight = Math.round(height * ratio);
@@ -91,18 +87,16 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           const ctx = canvas.getContext('2d');
           
           if (!ctx) {
-            resolve(originalBase64); // 降级处理
+            resolve(originalBase64); 
             return;
           }
           
-          // 填充白色背景（防止透明 PNG 压缩为 JPEG 时变黑）
           ctx.fillStyle = '#FFFFFF';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0, newWidth, newHeight);
           
           const newBase64 = canvas.toDataURL('image/jpeg', quality);
           
-          // 核心拦截：如果压缩后的字符串体积反而比原图大（防膨胀），则原样返回原图的 base64
           if (newBase64.length >= originalBase64.length) {
             resolve(originalBase64);
           } else {
@@ -125,7 +119,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         setSelectedFiles((prev) => [...prev, ...docs].slice(0, 10));
       }
 
-      // 秒速添加预览，不在这里阻塞进行压缩转换
       if (images.length > 0) {
         const newImages = images.map(file => ({
           file,
@@ -183,7 +176,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     
     try {
       const finalImages: MessageImage[] = [];
-      // 在发送前，根据用户选择的开关状态统一处理图片
       for (const imgData of selectedImages) {
         let base64 = '';
         if (isCompressionEnabled) {
@@ -194,15 +186,13 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         finalImages.push({ name: imgData.file.name, base64 });
       }
 
-      onSubmit(input, selectedFiles, selectedUrls, finalImages);
+      onSubmit(input, selectedFiles, selectedUrls, finalImages, isRAGEnabled, isPublic);
 
       setInput('');
       setSelectedFiles([]);
       setSelectedUrls([]);
-      // 清理内存中的 blob URL
       selectedImages.forEach(img => URL.revokeObjectURL(img.preview));
       setSelectedImages([]);
-      // 发送完毕后自动恢复默认压缩选项
       setIsCompressionEnabled(true);
     } finally {
       setIsProcessing(false);
@@ -231,9 +221,21 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
             <FileSpreadsheet size={16} />
             审核供应商答复
           </button>
+
+          <button
+            onClick={() => setIsRAGEnabled(!isRAGEnabled)}
+            disabled={isSubmitting || !!templateMode}
+            className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
+              isRAGEnabled
+                ? 'bg-[#1e3a5f] text-cyan-400 border border-b-0 border-cyan-800 shadow-[0_4px_0_0_#1e3a5f] translate-y-[1px] relative z-10'
+                : 'bg-transparent text-gray-400 hover:text-gray-200 border border-transparent'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            <Database size={16} />
+            启用知识库
+          </button>
         </div>
 
-        {/* 附件缩略图展示区 */}
         {(selectedFiles.length > 0 || selectedUrls.length > 0 || selectedImages.length > 0) && !templateMode && (
           <div className="absolute -top-[72px] left-0 right-0 z-10 flex gap-3 overflow-x-auto pb-2 items-end" style={{ scrollbarWidth: 'none' }}>
             {selectedImages.map((img, index) => (
@@ -279,11 +281,11 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           className={`relative flex items-end gap-2 transition-all shadow-sm ${
             templateMode
               ? 'bg-[#2a2b3d] border border-gray-700 rounded-b-xl rounded-tr-xl p-6 shadow-lg'
-              : `bg-[#313244] border border-gray-700 p-2 ${
+              : `${isRAGEnabled ? 'bg-[#1e3a5f] border-cyan-800' : 'bg-[#313244] border-gray-700'} p-2 ${
                   selectedFiles.length > 0 || selectedUrls.length > 0 || selectedImages.length > 0
-                    ? 'rounded-b-xl rounded-tr-xl'
-                    : 'rounded-xl'
-                } focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500`
+                    ? 'rounded-b-xl rounded-tr-xl border'
+                    : 'rounded-xl border'
+                } focus-within:ring-1 ${isRAGEnabled ? 'focus-within:ring-cyan-500 focus-within:border-cyan-500' : 'focus-within:ring-blue-500 focus-within:border-blue-500'}`
           }`}
         >
           {templateMode === 'audit_supplier' ? (
@@ -377,8 +379,8 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                   }
                 }}
                 disabled={isSubmitting}
-                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : "输入消息... 或直接截图 Ctrl+V 粘贴图片"}
-                className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 text-gray-200 placeholder-gray-500 outline-none ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
+                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : (isRAGEnabled ? "已连接知识库，可以直接对历史文件和对话提问..." : "输入消息... 或直接截图 Ctrl+V 粘贴图片")}
+                className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 outline-none ${isRAGEnabled ? 'text-cyan-50 placeholder-cyan-200/50' : 'text-gray-200 placeholder-gray-500'} ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
                 rows={1}
               />
 
@@ -386,7 +388,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                 <button
                   type="submit"
                   disabled={isSubmitting || (!input.trim() && selectedFiles.length === 0 && selectedUrls.length === 0 && selectedImages.length === 0)}
-                  className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className={`p-2 ${isRAGEnabled ? 'bg-cyan-600 hover:bg-cyan-700' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors`}
                 >
                   <Send size={20} />
                 </button>
@@ -395,14 +397,18 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           )}
         </form>
 
-        {/* 底部信息与图片压缩控制区 */}
         {!templateMode && (
           <div className="flex justify-between items-center mt-2 px-1">
-            <div className="text-xs text-gray-500">
-              按 Enter 发送，或直接截屏粘贴图片。目前单次对话只能处理 128k 以下数据
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500">按 Enter 发送，或直接截屏粘贴图片。单次上限 128k</span>
+              {selectedFiles.length > 0 && (
+                <div className="flex items-center gap-1.5 text-xs animate-in fade-in duration-300">
+                  <input type="checkbox" id="publicToggle" checked={isPublic} onChange={(e) => setIsPublic(e.target.checked)} className="rounded border-gray-600 bg-[#313244] text-blue-500 cursor-pointer" />
+                  <label htmlFor="publicToggle" className="cursor-pointer text-gray-400 hover:text-gray-300">保存到公共数据库</label>
+                </div>
+              )}
             </div>
             
-            {/* 只有在包含图片时才显示压缩控制开关 */}
             {selectedImages.length > 0 && (
               <div className="flex items-center gap-1.5 text-xs animate-in fade-in duration-300">
                 <input
@@ -412,10 +418,9 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                   disabled={isSubmitting}
                   onChange={(e) => {
                     const isChecked = e.target.checked;
-                    // 如果用户想要取消勾选，进行安全提醒
                     if (!isChecked) {
-                      const confirm = window.confirm('⚠️ 性能警告\n\n取消压缩将直接发送原图，这会极大增加本地大模型的解析耗时（每张图可能增加数十秒）和显存占用。\n\n确定要发送原图吗？');
-                      if (!confirm) return; // 用户取消则保持原状
+                      const confirm = window.confirm('⚠️ 性能警告\n\n取消压缩将直接发送原图，这会极大增加解析耗时。\n\n确定要发送原图吗？');
+                      if (!confirm) return; 
                     }
                     setIsCompressionEnabled(isChecked);
                   }}
@@ -433,7 +438,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         )}
       </div>
 
-      {/* 网址解析弹出层 */}
       {showUrlModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-[#181825] border border-gray-700 rounded-xl w-full max-w-md shadow-2xl overflow-hidden">
