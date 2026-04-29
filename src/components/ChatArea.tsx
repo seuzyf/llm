@@ -78,6 +78,7 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
 
       // 静默挂载知识库提示词
       if (injectedCitations && injectedCitations.length > 0) {
+        console.log('[RAG Frontend] 开始执行拼接，当前收到的片段数:', injectedCitations.length);
         const lastUserMsg = apiMessages[apiMessages.length - 1];
         if (lastUserMsg && lastUserMsg.role === 'user') {
           const contextStr = injectedCitations.map((c: any) => `[来源: ${c.name}]\n${c.content}`).join('\n\n');
@@ -89,8 +90,13 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
             const textObj = lastUserMsg.content.find((c: any) => c.type === 'text');
             if (textObj) textObj.text = augmentedInput;
           }
+          console.log('[RAG Frontend] 拼接完成！最终要发给大模型的消息内容是:\n', augmentedInput);
         }
+      } else {
+        console.log('[RAG Frontend] injectedCitations 为空，走正常非知识库对话');
       }
+
+      console.log('[RAG Frontend] 即将发往 /api/chat 的 payload:', JSON.stringify(apiMessages).substring(0, 500) + '...');
 
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -228,6 +234,7 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     let fetchedCitations: Citation[] = [];
 
     if (isRAGEnabled && input.trim()) {
+      console.log('[RAG Frontend] 开始请求 /api/rag/search，参数 query:', input);
       try {
         const ragRes = await fetch('/api/rag/search', {
           method: 'POST',
@@ -236,11 +243,17 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         });
         if (ragRes.ok) {
           const ragData = await ragRes.json();
+          console.log('[RAG Frontend] 接口响应数据:', ragData);
           if (ragData.citations && ragData.citations.length > 0) {
             fetchedCitations = ragData.citations;
+            console.log(`[RAG Frontend] 成功提取到 ${fetchedCitations.length} 条检索片段，准备交接给 processChatStream`);
+          } else {
+            console.warn('[RAG Frontend] citations 为空，知识库没匹配到任何内容');
           }
         }
-      } catch (err) { console.error('RAG 检索失败', err); }
+      } catch (err) { console.error('[RAG Frontend] RAG 检索网络请求失败', err); }
+    } else {
+      console.log('[RAG Frontend] 未触发检索。isRAGEnabled:', isRAGEnabled);
     }
 
     const currentAttachedUrls = [...selectedUrls];
