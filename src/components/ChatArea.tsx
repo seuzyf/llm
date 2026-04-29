@@ -1,7 +1,7 @@
 // src/components/ChatArea.tsx
 import React, { useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { Message, ChatSession, MessageFile, MessageImage } from '../types';
+import { Message, ChatSession, MessageFile, MessageImage, Citation } from '../types';
 import { browserFetchUrl } from '../utils/browserFetch';
 import MessageList from './MessageList';
 import ChatInput from './ChatInput';
@@ -13,16 +13,21 @@ interface ChatAreaProps {
   setIsGenerating: (val: boolean) => void;
 }
 
-// 适配 128k 上下文的限制
 const MAX_UPLOAD_LENGTH = 128000;
 const MAX_CONTEXT_CHARS = 120000;
 
 export default function ChatArea({ session, onUpdateMessages, isGenerating, setIsGenerating }: ChatAreaProps) {
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const processChatStream = async (currentMessages: Message[], assistantId: string) => {
+  const getUsername = () => localStorage.getItem('chat_username') || 'anonymous';
+
+  const processChatStream = async (currentMessages: Message[], assistantId: string, injectedCitations?: Citation[]) => {
     abortControllerRef.current = new AbortController();
     let assistantMsg = currentMessages.find(m => m.id === assistantId)!;
+
+    if (injectedCitations && injectedCitations.length > 0) {
+      assistantMsg.citations = injectedCitations;
+    }
 
     try {
       let currentChars = 0;
@@ -35,7 +40,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       for (const m of historyWindow) {
         let text = m.content;
         
-        // 挂载普通文档内容
         if (m.files && m.files.length > 0 && !m.isTemplateCall) {
           const hasTextFiles = m.files.some((f) => f.content);
           if (hasTextFiles) {
@@ -48,7 +52,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
           }
         }
 
-        // 裁切超长文本
         if (currentChars + text.length > MAX_CONTEXT_CHARS) {
           const remainingSpace = MAX_CONTEXT_CHARS - currentChars;
           if (apiMessages.length === 0) {
@@ -60,7 +63,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
 
         currentChars += text.length;
 
-        // 核心修改点：如果包含图片，转换为标准多模态支持的数组格式
         if (m.images && m.images.length > 0) {
           const contentArray: any[] = [{ type: 'text', text: text }];
           m.images.forEach(img => {
@@ -72,6 +74,22 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         }
 
         if (currentChars > MAX_CONTEXT_CHARS) break;
+      }
+
+      // 静默挂载知识库提示词
+      if (injectedCitations && injectedCitations.length > 0) {
+        const lastUserMsg = apiMessages[apiMessages.length - 1];
+        if (lastUserMsg && lastUserMsg.role === 'user') {
+          const contextStr = injectedCitations.map((c: any) => `[来源: ${c.name}]\n${c.content}`).join('\n\n');
+          const augmentedInput = `参考以下检索到的历史资料来回答我的问题：\n\n<检索资料>\n${contextStr}\n</检索资料>\n\n我的问题：${lastUserMsg.content}`;
+          
+          if (typeof lastUserMsg.content === 'string') {
+            lastUserMsg.content = augmentedInput;
+          } else if (Array.isArray(lastUserMsg.content)) {
+            const textObj = lastUserMsg.content.find((c: any) => c.type === 'text');
+            if (textObj) textObj.text = augmentedInput;
+          }
+        }
       }
 
       const response = await fetch('/api/chat', {
@@ -119,9 +137,7 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
                   if (content) assistantMsg.content += content;
                   onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
                 }
-              } catch (e) {
-                console.error('解析流数据出错', e, line);
-              }
+              } catch (e) {}
             }
           }
         }
@@ -204,16 +220,34 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     input: string, 
     selectedFiles: File[], 
     selectedUrls: string[],
-    selectedImages: MessageImage[]
+    selectedImages: MessageImage[],
+    isRAGEnabled: boolean = false,
+    isPublic: boolean = false
   ) => {
     const userMsgId = uuidv4();
-    const currentAttachedUrls = [...selectedUrls];
+    let fetchedCitations: Citation[] = [];
 
+    if (isRAGEnabled && input.trim()) {
+      try {
+        const ragRes = await fetch('/api/rag/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: input, username: getUsername() })
+        });
+        if (ragRes.ok) {
+          const ragData = await ragRes.json();
+          if (ragData.citations && ragData.citations.length > 0) {
+            fetchedCitations = ragData.citations;
+          }
+        }
+      } catch (err) { console.error('RAG 检索失败', err); }
+    }
+
+    const currentAttachedUrls = [...selectedUrls];
     const urlRegex = /(https?:\/\/[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]+)/g;
     const inlineUrls = input.match(urlRegex) || [];
     const allUrlsToParse = Array.from(new Set([...currentAttachedUrls, ...inlineUrls]));
     const hasUrls = allUrlsToParse.length > 0;
-
     const isUploadingFlag = selectedFiles.length > 0 || hasUrls;
 
     const userMessage: Message = {
@@ -237,7 +271,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     let uploadedMessageFiles: MessageFile[] = [];
     let parsedUrlFiles: MessageFile[] = [];
 
-    // 处理文档类文件上传
     if (selectedFiles.length > 0) {
       try {
         const uploadResult = await new Promise<any>((resolve, reject) => {
@@ -262,6 +295,8 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
 
           xhr.onerror = () => reject(new Error('网络错误'));
           xhr.open('POST', '/api/upload');
+          xhr.setRequestHeader('X-User-Name', encodeURIComponent(getUsername()));
+          xhr.setRequestHeader('X-Is-Public', isPublic ? 'true' : 'false');
           xhr.send(formData);
         });
 
@@ -284,7 +319,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       }
     }
 
-    // 处理 URL 抓取
     if (hasUrls) {
       for (const url of allUrlsToParse) {
         let result: any = null;
@@ -329,7 +363,7 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     currentMessages = [...currentMessages, assistantMsg];
     onUpdateMessages(currentMessages);
 
-    await processChatStream(currentMessages, assistantId);
+    await processChatStream(currentMessages, assistantId, fetchedCitations);
   };
 
   return (
