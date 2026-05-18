@@ -568,6 +568,16 @@ async function startServer() {
   });
 
   app.post('/api/chat', async (req, res) => {
+    const abortController = new AbortController();
+
+    // 核心修正：监听响应流 (res) 的 close 事件，判断输出是否真正结束
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        console.log('[API] 客户端已断开，同步终止 LM Studio 生成');
+        abortController.abort();
+      }
+    });
+
     try {
       try {
         const modelsRes = await fetch(`${LM_BASE_URL}/models`);
@@ -581,15 +591,20 @@ async function startServer() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body),
+        signal: abortController.signal,
       });
 
-      if (!upstream.ok && !req.body.stream) return res.status(upstream.status).json({ error: await upstream.text() });
+      if (!upstream.ok && !req.body.stream) {
+        return res.status(upstream.status).json({ error: await upstream.text() });
+      }
 
       if (req.body.stream) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('X-Accel-Buffering', 'no');
+        
         if (!upstream.body) return res.end();
+        
         const reader = (upstream.body as unknown as ReadableStream<Uint8Array>).getReader();
         const pump = async () => {
           while (true) {
@@ -599,13 +614,23 @@ async function startServer() {
           }
           res.end();
         };
-        pump().catch(() => { if (!res.writableEnded) res.end(); });
-        req.on('close', () => reader.cancel().catch(() => {}));
+        
+        pump().catch(() => { 
+          if (!res.writableEnded) res.end(); 
+        });
+        
       } else {
         return res.json(await upstream.json());
       }
     } catch (error: any) {
-      return res.status(500).json({ error: error.message });
+      // 捕获由 abortController 引发的强行中断，静默退出避免报错
+      if (error.name === 'AbortError') {
+        if (!res.writableEnded) return res.end();
+        return;
+      }
+      if (!res.writableEnded) {
+        return res.status(500).json({ error: error.message });
+      }
     }
   });
 
