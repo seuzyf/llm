@@ -76,7 +76,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         if (currentChars > MAX_CONTEXT_CHARS) break;
       }
 
-      // 静默挂载知识库提示词
       if (injectedCitations && injectedCitations.length > 0) {
         console.log('[RAG Frontend] 开始执行拼接，当前收到的片段数:', injectedCitations.length);
         const lastUserMsg = apiMessages[apiMessages.length - 1];
@@ -95,8 +94,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       } else {
         console.log('[RAG Frontend] injectedCitations 为空，走正常非知识库对话');
       }
-
-      console.log('[RAG Frontend] 即将发往 /api/chat 的 payload:', JSON.stringify(apiMessages).substring(0, 500) + '...');
 
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -122,12 +119,17 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       const decoder = new TextDecoder('utf-8');
       let done = false;
 
+      // 【修复点】：增加渲染节流控制
+      let lastRenderTime = Date.now(); 
+
       while (!done) {
         const { value, done: readerDone } = await reader.read();
         done = readerDone;
         if (value) {
           const chunk = decoder.decode(value, { stream: true });
           const lines = chunk.split('\n').filter((line) => line.trim() !== '');
+
+          let hasUpdates = false;
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
@@ -141,13 +143,26 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
                 if (content || reasoning) {
                   if (reasoning) assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoning;
                   if (content) assistantMsg.content += content;
-                  onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
+                  hasUpdates = true;
                 }
               } catch (e) {}
             }
           }
+
+          // 节流处理：限制视图每 60 毫秒最多只重绘一次，解决 OOM 内存溢出卡死
+          if (hasUpdates) {
+            const now = Date.now();
+            if (now - lastRenderTime > 60) {
+              onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
+              lastRenderTime = now;
+            }
+          }
         }
       }
+      
+      // 循环结束后必须做一次最终收尾更新，确保不漏字符
+      onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
+      
     } catch (error: any) {
       if (error.name !== 'AbortError') {
         let friendlyError = error.message;
