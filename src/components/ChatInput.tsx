@@ -131,30 +131,47 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     setShowAttachMenu(false);
   };
 
+  // 【修改点】：全面支持剪贴板中的通用文件与图片
   const handlePaste = (e: React.ClipboardEvent) => {
     if (templateMode) return;
     const items = e.clipboardData?.items;
     if (!items) return;
 
     let hasImage = false;
+    let hasFile = false;
     const newImages: SelectedImageData[] = [];
+    const newFiles: File[] = [];
 
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith('image/')) {
-        hasImage = true;
-        const file = items[i].getAsFile();
+      const item = items[i];
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
         if (file) {
-          const namedFile = new File([file], file.name || `pasted_image_${Date.now()}.png`, { type: file.type });
-          newImages.push({ 
-            file: namedFile, 
-            preview: URL.createObjectURL(namedFile) 
-          });
+          if (file.type.startsWith('image/')) {
+            hasImage = true;
+            // 处理截图等无名称的图片
+            const namedFile = new File([file], file.name || `pasted_image_${Date.now()}.png`, { type: file.type });
+            newImages.push({ 
+              file: namedFile, 
+              preview: URL.createObjectURL(namedFile) 
+            });
+          } else {
+            hasFile = true;
+            // 直接复制的文件通常会保留文件名
+            const namedFile = new File([file], file.name || `pasted_file_${Date.now()}`, { type: file.type });
+            newFiles.push(namedFile);
+          }
         }
       }
     }
 
     if (hasImage && newImages.length > 0) {
       setSelectedImages((prev) => [...prev, ...newImages]);
+    }
+
+    if (hasFile && newFiles.length > 0) {
+      // 保持最多支持 10 个文件的限制
+      setSelectedFiles((prev) => [...prev, ...newFiles].slice(0, 10));
     }
   };
 
@@ -379,7 +396,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                   }
                 }}
                 disabled={isSubmitting}
-                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : (isRAGEnabled ? "已连接知识库，可以直接对历史文件和对话提问..." : "输入消息... 或直接截图 Ctrl+V 粘贴图片")}
+                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : (isRAGEnabled ? "已连接知识库，可以直接对历史文件和对话提问..." : "输入消息... 或直接 Ctrl+V 粘贴文件/图片")}
                 className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 outline-none ${isRAGEnabled ? 'text-cyan-50 placeholder-cyan-200/50' : 'text-gray-200 placeholder-gray-500'} ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
                 rows={1}
               />
@@ -400,7 +417,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         {!templateMode && (
           <div className="flex justify-between items-center mt-2 px-1">
             <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500">按 Enter 发送，或直接截屏粘贴图片。单次上限 128k</span>
+              <span className="text-xs text-gray-500">按 Enter 发送，或直接截屏/复制文件粘贴。单次对话的上下文限制为128k</span>
               {selectedFiles.length > 0 && (
                 <div className="flex items-center gap-1.5 text-xs animate-in fade-in duration-300">
                   <input type="checkbox" id="publicToggle" checked={isPublic} onChange={(e) => setIsPublic(e.target.checked)} className="rounded border-gray-600 bg-[#313244] text-blue-500 cursor-pointer" />
