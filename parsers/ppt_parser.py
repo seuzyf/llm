@@ -12,6 +12,7 @@ def _progid_to_ext(prog_id: str) -> str:
         'excel.sheet': '.xlsx', 'excel.chart': '.xlsx',
         'powerpoint': '.pptx', 'acrord': '.pdf',
         'pdf': '.pdf', 'package': '',
+        'outlook.msgattach': '.msg', 'msgfile': '.msg', 'message': '.msg'
     }
     for key, ext in mapping.items():
         if key in prog_id:
@@ -65,8 +66,16 @@ def _extract_pptx_slide_attachments(slide, pptx_zip, slide_idx):
             prog_id = ole.get('progId') or ''
             user_label = ole.get('name') or ''
             ext_guess = _progid_to_ext(prog_id)
-            if ext_guess and user_label:
-                named_map[r_id] = f"{user_label}{ext_guess}"
+            
+            # 增强 OLE 对象的识别兜底：即使没有 progId 映射，只要名称包含 msg/mail，也强制转配后缀
+            final_name = user_label or f"oleObject_{r_id}"
+            if ext_guess and not final_name.lower().endswith(ext_guess):
+                final_name += ext_guess
+            elif '.' not in final_name and ('mail' in prog_id.lower() or 'msg' in prog_id.lower()):
+                final_name += '.msg'
+                
+            if final_name:
+                named_map[r_id] = final_name
         
         with pptx_zip.open(rels_path) as f:
             tree = ET.parse(f)
@@ -94,7 +103,7 @@ def _extract_pptx_slide_attachments(slide, pptx_zip, slide_idx):
                     junk_exts = ['.bin', '.emf', '.wmf', '.png', '.jpg', '.jpeg', '.gif', '.mp4']
                     if ext not in junk_exts:
                         new_attachments.append((dname, data))
-            
+                
             attachments = new_attachments[:5]
     except Exception:
         pass
