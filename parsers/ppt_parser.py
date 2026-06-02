@@ -1,3 +1,4 @@
+# parsers/ppt_parser.py
 import os
 import tempfile
 import zipfile
@@ -19,11 +20,14 @@ def _progid_to_ext(prog_id: str) -> str:
 
 def _extract_pptx_slide_attachments(slide, pptx_zip, slide_idx):
     attachments = []
-    slide_part_name = slide.part.partname
-    rel_path = slide_part_name.lstrip('/')
-    rel_dir  = os.path.dirname(rel_path)
-    rels_path = f"ppt/slides/_rels/slide{slide_idx}.xml.rels"
-    
+    try:
+        slide_part_name = slide.part.partname
+        rel_path = slide_part_name.lstrip('/')
+        rel_dir  = os.path.dirname(rel_path)
+        rels_path = f"ppt/slides/_rels/slide{slide_idx}.xml.rels"
+    except Exception:
+        return []
+        
     try:
         with pptx_zip.open(rels_path) as f:
             import xml.etree.ElementTree as ET
@@ -84,9 +88,14 @@ def _extract_pptx_slide_attachments(slide, pptx_zip, slide_idx):
                         new_attachments.append((friendly, data))
                         replaced = True
                         break
+                
                 if not replaced:
-                    new_attachments.append((dname, data))
-            attachments = new_attachments
+                    ext = os.path.splitext(dname)[1].lower()
+                    junk_exts = ['.bin', '.emf', '.wmf', '.png', '.jpg', '.jpeg', '.gif', '.mp4']
+                    if ext not in junk_exts:
+                        new_attachments.append((dname, data))
+            
+            attachments = new_attachments[:5]
     except Exception:
         pass
 
@@ -106,18 +115,14 @@ def parse_ppt(file_path, display_name, parse_callback):
 
                 text_runs = []
                 for shape in slide.shapes:
-                    # 1. 提取普通文本框文字
                     if hasattr(shape, "text") and shape.text.strip():
                         text_runs.append(shape.text.strip())
-                    # 2. 提取表格文字
                     elif shape.has_table:
                         for row in shape.table.rows:
                             row_cells = []
                             for cell in row.cells:
-                                # 提取单元格文本并替换内部换行符，保持单行结构
                                 cell_text = cell.text.strip().replace('\n', ' ')
                                 row_cells.append(cell_text)
-                            # 如果该行有任何内容，则以 " | " 分隔符连接并加入结果中
                             if any(row_cells):
                                 text_runs.append(" | ".join(row_cells))
 
@@ -151,23 +156,54 @@ def parse_ppt(file_path, display_name, parse_callback):
         return "\n\n".join(slide_outputs)
 
     elif ext == '.ppt':
+        tmp_dir = None
+        powerpoint = None
+        prs_com = None
         try:
-            import win32com.client
-            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            try:
+                import win32com.client
+                import pythoncom
+            except ImportError:
+                raise RuntimeError("解析 .ppt 需要安装 pypiwin32。建议另存为 .pptx 格式。")
+
+            pythoncom.CoInitialize()
+
+            try:
+                powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            except Exception:
+                powerpoint = win32com.client.DispatchEx("PowerPoint.Application")
+            
+            try:
+                powerpoint.DisplayAlerts = 1 
+            except Exception:
+                pass
+
             abs_path = os.path.abspath(file_path)
-            prs_com = powerpoint.Presentations.Open(abs_path, WithWindow=False)
+            prs_com = powerpoint.Presentations.Open(abs_path, ReadOnly=True, Untitled=False, WithWindow=False)
 
             tmp_dir = tempfile.mkdtemp()
             tmp_pptx = os.path.join(tmp_dir, "converted.pptx")
             prs_com.SaveAs(tmp_pptx, FileFormat=24)
+            
             prs_com.Close()
-            powerpoint.Quit()
+            prs_com = None
 
             return parse_callback(tmp_pptx, display_name=display_name)
+            
         except Exception as e:
             raise RuntimeError(f"读取 .ppt 失败: {str(e)}")
         finally:
+            if prs_com is not None:
+                try:
+                    prs_com.Close()
+                except Exception:
+                    pass
+            if tmp_dir and os.path.exists(tmp_dir):
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
             try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+                pythoncom.CoUninitialize()
             except Exception:
                 pass

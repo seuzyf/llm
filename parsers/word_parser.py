@@ -17,11 +17,17 @@ def parse_word(file_path):
                     content.append(text)
                     
             for table in doc.tables:
+                seen_tc = set()  # 增加底层 XML 节点追踪池，彻底解决跨行/跨列合并带来的重复问题
                 for row in table.rows:
                     row_data = []
                     for cell in row.cells:
+                        # 通过底层 _tc 对象判断该物理单元格是否已经被提取过
+                        if cell._tc in seen_tc:
+                            continue
+                        seen_tc.add(cell._tc)
+                        
                         cell_text = cell.text.strip().replace('\n', ' ')
-                        if cell_text and (not row_data or row_data[-1] != cell_text):
+                        if cell_text:
                             row_data.append(cell_text)
                     if row_data:
                         content.append(" | ".join(row_data))
