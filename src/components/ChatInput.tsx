@@ -131,7 +131,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     setShowAttachMenu(false);
   };
 
-  // 【修改点】：全面支持剪贴板中的通用文件与图片
   const handlePaste = (e: React.ClipboardEvent) => {
     if (templateMode) return;
     const items = e.clipboardData?.items;
@@ -149,7 +148,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         if (file) {
           if (file.type.startsWith('image/')) {
             hasImage = true;
-            // 处理截图等无名称的图片
             const namedFile = new File([file], file.name || `pasted_image_${Date.now()}.png`, { type: file.type });
             newImages.push({ 
               file: namedFile, 
@@ -157,7 +155,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
             });
           } else {
             hasFile = true;
-            // 直接复制的文件通常会保留文件名
             const namedFile = new File([file], file.name || `pasted_file_${Date.now()}`, { type: file.type });
             newFiles.push(namedFile);
           }
@@ -170,7 +167,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     }
 
     if (hasFile && newFiles.length > 0) {
-      // 保持最多支持 10 个文件的限制
       setSelectedFiles((prev) => [...prev, ...newFiles].slice(0, 10));
     }
   };
@@ -417,7 +413,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         {!templateMode && (
           <div className="flex justify-between items-center mt-2 px-1">
             <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500">按 Enter 发送，或直接截屏/复制文件粘贴。单次对话的上下文限制为128k</span>
+              <span className="text-xs text-gray-500">按 Enter 发送，或直接截屏/复制文件粘贴。单次对话的上下文限制为200k token</span>
               {selectedFiles.length > 0 && (
                 <div className="flex items-center gap-1.5 text-xs animate-in fade-in duration-300">
                   <input type="checkbox" id="publicToggle" checked={isPublic} onChange={(e) => setIsPublic(e.target.checked)} className="rounded border-gray-600 bg-[#313244] text-blue-500 cursor-pointer" />
