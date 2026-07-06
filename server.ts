@@ -679,6 +679,99 @@ async function startServer() {
     });
   });
 
+  // ========== 生产设备需求审核 API ==========
+  app.post('/api/audit-equipment', async (req, res) => {
+    const batchId = Date.now().toString();
+    const batchDir = path.join(process.cwd(), 'uploads', 'templates', batchId);
+    fs.mkdirSync(batchDir, { recursive: true });
+
+    const equipmentStorage = multer.diskStorage({
+      destination: batchDir,
+      filename: (_req, file, cb) => {
+        const safeName = Buffer.from(file.originalname, 'latin1').toString('utf8')
+          .replace(/[^a-zA-Z0-9.\-_一-龥]/g, '_');
+        cb(null, safeName);
+      }
+    });
+
+    const equipmentUpload = multer({ storage: equipmentStorage }).array('files', 10);
+
+    return new Promise<void>((resolve) => {
+      equipmentUpload(req, res, async (err) => {
+        if (err) { resolve(); return res.status(400).json({ error: '上传失败' }); }
+        const fileCount = req.files ? (req.files as Express.Multer.File[]).length : 0;
+        if (!req.files || fileCount !== 2) { resolve(); return res.status(400).json({ error: '请上传恰好两个文件' }); }
+
+        try {
+          console.log('[EquipmentAudit] 开始解析文件...');
+          const files = req.files as Express.Multer.File[];
+          const standardFile = await parseFile(files[0].path, Buffer.from(files[0].originalname, 'latin1').toString('utf8'));
+          const reviewFile = await parseFile(files[1].path, Buffer.from(files[1].originalname, 'latin1').toString('utf8'));
+
+          console.log('[EquipmentAudit] 解析完成:', standardFile.text.length + reviewFile.text.length, '字符');
+
+          if (standardFile.text.startsWith('[⚠️') || !standardFile.text) {
+            resolve(); return res.status(500).json({ error: '生产设备技术标准解析失败', details: standardFile.error });
+          }
+          if (reviewFile.text.startsWith('[⚠️') || !reviewFile.text) {
+            resolve(); return res.status(500).json({ error: '需求评审表解析失败', details: reviewFile.error });
+          }
+
+          console.log('[EquipmentAudit] 加载 prompt 模板...');
+          const promptPath = path.join(process.cwd(), 'src', 'equipment_audit', 'prompt.txt');
+          if (!fs.existsSync(promptPath)) {
+            resolve(); return res.status(500).json({ error: '服务端未找到 equipment_audit/prompt.txt' });
+          }
+
+          const promptTemplate = fs.readFileSync(promptPath, 'utf-8');
+          const finalPrompt = promptTemplate
+            .replace('{technical_standard}', standardFile.text)
+            .replace('{requirement_review}', reviewFile.text);
+
+          console.log('[EquipmentAudit] 请求 LLM API...');
+          let modelId: string | undefined;
+          try {
+            const modelsRes = await fetch(`${LM_BASE_URL}/models`);
+            if (modelsRes.ok) {
+              const modelsData = await modelsRes.json();
+              if (modelsData?.data && modelsData.data.length > 0) modelId = modelsData.data[0].id;
+            }
+          } catch {}
+
+          const apiMessages: any[] = [
+            { role: 'user', content: finalPrompt },
+          ];
+
+          const response = await fetch(`${LM_BASE_URL}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: apiMessages, model: modelId }),
+          });
+
+          console.log('[EquipmentAudit] LLM API 响应状态:', response.status);
+
+          if (!response.ok) {
+            const errText = await response.text();
+            resolve(); return res.status(500).json({ error: 'LLM 请求失败', details: errText });
+          }
+
+          const data = await response.json();
+          const report = data?.choices?.[0]?.message?.content || '[⚠️ LLM 返回为空，请重试]';
+
+          console.log('[EquipmentAudit] 审核完成，报告长度:', report.length);
+
+          try { fs.rmSync(batchDir, { recursive: true, force: true }); } catch {}
+          resolve(); return res.json({ report });
+        } catch (error: any) {
+          console.log('[EquipmentAudit] 处理异常:', error.message);
+          if (!res.headersSent) {
+            resolve(); return res.status(500).json({ error: '审核处理失败', details: error.message });
+          }
+        }
+      });
+    });
+  });
+
   app.get('/api/models', async (_req, res) => {
     try {
       const response = await fetch(`${LM_BASE_URL}/models`);
