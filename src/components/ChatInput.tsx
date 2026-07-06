@@ -1,12 +1,13 @@
 // src/components/ChatInput.tsx
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Paperclip, X, FileUp, Link as LinkIcon, FileSpreadsheet, FileText, Image as ImageIcon, Database } from 'lucide-react';
+import { Send, Paperclip, X, FileUp, Link as LinkIcon, FileSpreadsheet, FileText, Image as ImageIcon, Database, HardHat } from 'lucide-react';
 import { MessageImage } from '../types';
 
 interface ChatInputProps {
   isGenerating: boolean;
   onSubmit: (input: string, files: File[], urls: string[], images: MessageImage[], isRAGEnabled: boolean, isPublic: boolean) => void;
   onTemplateSubmit: (files: File[]) => void;
+  onEquipmentAudit: (reportContent: string) => void;
 }
 
 interface SelectedImageData {
@@ -14,7 +15,7 @@ interface SelectedImageData {
   preview: string; 
 }
 
-export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: ChatInputProps) {
+export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, onEquipmentAudit }: ChatInputProps) {
   const [input, setInput] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [selectedUrls, setSelectedUrls] = useState<string[]>([]);
@@ -32,6 +33,9 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
   
   const [isRAGEnabled, setIsRAGEnabled] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
+
+  const [equipmentAuditMode, setEquipmentAuditMode] = useState(false);
+  const [auditFiles, setAuditFiles] = useState<File[]>([]);
 
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -218,6 +222,46 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
     setTemplateFiles([]);
   };
 
+  const handleEquipmentAuditSubmit = async (files: File[]) => {
+    if (files.length !== 2 || isSubmitting) return;
+
+    setIsProcessing(true);
+    try {
+      const formData = new FormData();
+      files.forEach(f => formData.append('files', f));
+
+      const res = await fetch('/api/audit-equipment', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        // 先读文本再尝试解析 JSON，避免 body stream 被重复消费
+        const text = await res.text();
+        let errMsg: string;
+        try {
+          const errJson = JSON.parse(text);
+          errMsg = (errJson.details || errJson.error || JSON.stringify(errJson));
+        } catch {
+          errMsg = text; // HTML 错误页，直接显示内容
+        }
+        throw new Error(`HTTP ${res.status}: ${errMsg}`);
+      }
+
+      const data = await res.json();
+
+      // 将审核报告直接展示给用户（不经过 LLM 处理）
+      onEquipmentAudit(data.report);
+
+      setEquipmentAuditMode(false);
+      setAuditFiles([]);
+    } catch (error: any) {
+      alert(`审核失败：${error.message}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   return (
     <div className="p-4 bg-[#1e1e2e] border-t border-gray-800 shrink-0">
       <div className="max-w-4xl mx-auto relative">
@@ -246,6 +290,19 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           >
             <Database size={16} />
             启用知识库
+          </button>
+
+          <button
+            onClick={() => setEquipmentAuditMode(!equipmentAuditMode)}
+            disabled={isSubmitting || !!templateMode}
+            className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
+              equipmentAuditMode
+                ? 'bg-[#1e3a5f] text-cyan-400 border border-b-0 border-cyan-800 shadow-[0_4px_0_0_#1e3a5f] translate-y-[1px] relative z-10'
+                : 'bg-transparent text-gray-400 hover:text-gray-200 border border-transparent'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            <HardHat size={16} />
+            生产设备需求审核
           </button>
         </div>
 
@@ -292,7 +349,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
         <form
           onSubmit={handleSubmit}
           className={`relative flex items-end gap-2 transition-all shadow-sm ${
-            templateMode
+            templateMode || equipmentAuditMode
               ? 'bg-[#2a2b3d] border border-gray-700 rounded-b-xl rounded-tr-xl p-6 shadow-lg'
               : `${isRAGEnabled ? 'bg-[#1e3a5f] border-cyan-800' : 'bg-[#313244] border-gray-700'} p-2 ${
                   selectedFiles.length > 0 || selectedUrls.length > 0 || selectedImages.length > 0
@@ -301,7 +358,51 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                 } focus-within:ring-1 ${isRAGEnabled ? 'focus-within:ring-cyan-500 focus-within:border-cyan-500' : 'focus-within:ring-blue-500 focus-within:border-blue-500'}`
           }`}
         >
-          {templateMode === 'audit_supplier' ? (
+          {equipmentAuditMode ? (
+            <div className="w-full flex flex-col items-center justify-center min-h-[120px] text-center animate-in fade-in zoom-in-95 duration-200">
+              <HardHat size={40} className="text-gray-500 mb-3 opacity-50" />
+              <p className="text-gray-300 mb-6 text-sm">请上传《生产设备技术标准》和《生产设备引入需求评审表_机关》，系统将自动对比并列出异常</p>
+
+              {/* 文件1：生产设备技术标准 */}
+              <div className="flex items-center gap-3 mb-4 w-full justify-center">
+                <span className="text-sm text-gray-400 shrink-0">{auditFiles[0]?.name ? '已上传' : '选择《生产设备技术标准》'}</span>
+                <input
+                  type="file" disabled={isSubmitting} accept=".xls,.xlsx,.xlsm,.doc,.docx,.pdf"
+                  name="files"
+                  data-file-index="0"
+                  onChange={(e) => { if (e.target.files && e.target.files.length > 0) setAuditFiles(prev => { const copy = [...prev]; const idx = Number((e.target as HTMLInputElement).dataset.fileIndex); copy[idx] = e.target.files![0]; return copy; }); }}
+                  className="text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-5 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                />
+              </div>
+
+              {/* 文件2：生产设备引入需求评审表_机关 */}
+              <div className="flex items-center gap-3 mb-4 w-full justify-center">
+                <span className="text-sm text-gray-400 shrink-0">{auditFiles[1]?.name ? '已上传' : '选择《生产设备引入需求评审表_机关》'}</span>
+                <input
+                  type="file" disabled={isSubmitting} accept=".xls,.xlsx,.xlsm,.doc,.docx,.pdf"
+                  name="files"
+                  data-file-index="1"
+                  onChange={(e) => { if (e.target.files && e.target.files.length > 0) setAuditFiles(prev => { const copy = [...prev]; const idx = Number((e.target as HTMLInputElement).dataset.fileIndex); copy[idx] = e.target.files![0]; return copy; }); }}
+                  className="text-sm text-gray-400 file:mr-4 file:py-2.5 file:px-5 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                />
+              </div>
+
+              {auditFiles.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-6 justify-center max-w-lg">
+                  {auditFiles.map((f, i) => (
+                    <span key={i} className="text-xs bg-gray-800 text-gray-300 px-3 py-1.5 rounded-md border border-gray-700 flex items-center gap-1.5">
+                      <FileText size={12} className="text-blue-400"/> {f.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button type="button" onClick={() => { setEquipmentAuditMode(false); setAuditFiles([]); }} disabled={isSubmitting} className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors">取消</button>
+                <button type="button" onClick={() => { if (auditFiles.length >= 2) handleEquipmentAuditSubmit(auditFiles); }} disabled={auditFiles.length !== 2 || isSubmitting} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 shadow-md">开始审核</button>
+              </div>
+            </div>
+          ) : templateMode === 'audit_supplier' ? (
             <div className="w-full flex flex-col items-center justify-center min-h-[120px] text-center animate-in fade-in zoom-in-95 duration-200">
               <FileSpreadsheet size={40} className="text-gray-500 mb-3 opacity-50" />
               <p className="text-gray-300 mb-4 text-sm">请上传需要智能审核的《供应商答复》Excel表格或邮件</p>
@@ -392,7 +493,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
                   }
                 }}
                 disabled={isSubmitting}
-                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : (isRAGEnabled ? "已连接知识库，可以直接对历史文件和对话提问..." : "输入消息... 或直接 Ctrl+V 粘贴文件/图片")}
+                placeholder={isProcessing ? "转换图片中，请稍候..." : isGenerating ? "模型正在处理任务中..." : (isRAGEnabled ? "已连接知识库，可以直接对历史文件和对话提问..." : "输入消息或直接 Ctrl+V 粘贴文件/图片，内容由模型自动生成，可能存在幻觉或事实偏差，仅供参考。")}
                 className={`w-full max-h-48 min-h-[44px] bg-transparent border-none focus:ring-0 resize-none py-2.5 px-3 outline-none ${isRAGEnabled ? 'text-cyan-50 placeholder-cyan-200/50' : 'text-gray-200 placeholder-gray-500'} ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
                 rows={1}
               />
@@ -410,7 +511,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit }: 
           )}
         </form>
 
-        {!templateMode && (
+        {!templateMode && !equipmentAuditMode && (
           <div className="flex justify-between items-center mt-2 px-1">
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500">按 Enter 发送，或直接截屏/复制文件粘贴。单次对话的上下文限制为200k token</span>
