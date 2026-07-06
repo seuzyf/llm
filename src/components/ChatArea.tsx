@@ -13,10 +13,9 @@ interface ChatAreaProps {
   setIsGenerating: (val: boolean) => void;
 }
 
-const MAX_UPLOAD_LENGTH = 128000;
-const MAX_CONTEXT_CHARS = 120000;
-
 export default function ChatArea({ session, onUpdateMessages, isGenerating, setIsGenerating }: ChatAreaProps) {
+  const MAX_UPLOAD_LENGTH = 128000;
+  const MAX_CONTEXT_CHARS = 120000;
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const getUsername = () => localStorage.getItem('chat_username') || 'anonymous';
@@ -28,6 +27,10 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     if (injectedCitations && injectedCitations.length > 0) {
       assistantMsg.citations = injectedCitations;
     }
+
+    let finalBotContent = '';
+    let finalUserContent = '';
+    let firstTokenTime = 0; // 用于记录大模型吐出第一个字的时间
 
     try {
       let currentChars = 0;
@@ -77,7 +80,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       }
 
       if (injectedCitations && injectedCitations.length > 0) {
-        console.log('[RAG Frontend] 开始执行拼接，当前收到的片段数:', injectedCitations.length);
         const lastUserMsg = apiMessages[apiMessages.length - 1];
         if (lastUserMsg && lastUserMsg.role === 'user') {
           const contextStr = injectedCitations.map((c: any) => `[来源: ${c.name}]\n${c.content}`).join('\n\n');
@@ -89,10 +91,7 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
             const textObj = lastUserMsg.content.find((c: any) => c.type === 'text');
             if (textObj) textObj.text = augmentedInput;
           }
-          console.log('[RAG Frontend] 拼接完成！最终要发给大模型的消息内容是:\n', augmentedInput);
         }
-      } else {
-        console.log('[RAG Frontend] injectedCitations 为空，走正常非知识库对话');
       }
 
       const response = await fetch('/api/chat', {
@@ -118,8 +117,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let done = false;
-
-      // 【修复点】：增加渲染节流控制
       let lastRenderTime = Date.now(); 
 
       while (!done) {
@@ -141,6 +138,9 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
                 const reasoning = data.choices[0]?.delta?.reasoning_content || '';
 
                 if (content || reasoning) {
+                  // 记录首字输出时间
+                  if (!firstTokenTime) firstTokenTime = Date.now();
+                  
                   if (reasoning) assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoning;
                   if (content) assistantMsg.content += content;
                   hasUpdates = true;
@@ -149,7 +149,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
             }
           }
 
-          // 节流处理：限制视图每 60 毫秒最多只重绘一次，解决 OOM 内存溢出卡死
           if (hasUpdates) {
             const now = Date.now();
             if (now - lastRenderTime > 60) {
@@ -160,8 +159,20 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         }
       }
       
-      // 循环结束后必须做一次最终收尾更新，确保不漏字符
+      // 流式读取彻底完毕，计算生成速度
+      const endTime = Date.now();
+      if (firstTokenTime > 0 && endTime > firstTokenTime) {
+        const durationSec = (endTime - firstTokenTime) / 1000;
+        const totalChars = assistantMsg.content.length + (assistantMsg.reasoningContent?.length || 0);
+        if (durationSec > 0.1) { // 避免除以0或极短时间造成的数值异常
+          assistantMsg.speed = `${(totalChars / durationSec).toFixed(1)} 字/秒`;
+        }
+      }
+      
       onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
+      
+      finalBotContent = assistantMsg.content;
+      finalUserContent = currentMessages.slice().reverse().find(m => m.role === 'user')?.content || '';
       
     } catch (error: any) {
       if (error.name !== 'AbortError') {
@@ -173,10 +184,36 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
       }
     } finally {
+      // 1. 彻底关闭生成状态，解放 UI 主线程
       assistantMsg.timestamp = Date.now();
       onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
       setIsGenerating(false);
       abortControllerRef.current = null;
+
+      // 2. 利用 requestIdleCallback（浏览器空闲期执行）彻底杜绝抢占资源
+      // 这样就算延迟再久，也一定是等用户在安静看回复时才执行
+      if (finalBotContent && finalBotContent.trim() !== '') {
+        const embedUsername = getUsername();
+        const executeEmbedding = () => {
+          fetch('/api/rag/embed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: embedUsername,
+              prompt: finalUserContent,
+              response: finalBotContent,
+              timestamp: Date.now()
+            })
+          }).catch(err => console.error('[Embedding API] 后台同步失败:', err));
+        };
+
+        if ('requestIdleCallback' in window) {
+          (window as any).requestIdleCallback(executeEmbedding, { timeout: 10000 });
+        } else {
+          // 降级方案：延迟 2 秒执行
+          setTimeout(executeEmbedding, 2000);
+        }
+      }
     }
   };
 
@@ -249,7 +286,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     let fetchedCitations: Citation[] = [];
 
     if (isRAGEnabled && input.trim()) {
-      console.log('[RAG Frontend] 开始请求 /api/rag/search，参数 query:', input);
       try {
         const ragRes = await fetch('/api/rag/search', {
           method: 'POST',
@@ -258,17 +294,11 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         });
         if (ragRes.ok) {
           const ragData = await ragRes.json();
-          console.log('[RAG Frontend] 接口响应数据:', ragData);
           if (ragData.citations && ragData.citations.length > 0) {
             fetchedCitations = ragData.citations;
-            console.log(`[RAG Frontend] 成功提取到 ${fetchedCitations.length} 条检索片段，准备交接给 processChatStream`);
-          } else {
-            console.warn('[RAG Frontend] citations 为空，知识库没匹配到任何内容');
           }
         }
       } catch (err) { console.error('[RAG Frontend] RAG 检索网络请求失败', err); }
-    } else {
-      console.log('[RAG Frontend] 未触发检索。isRAGEnabled:', isRAGEnabled);
     }
 
     const currentAttachedUrls = [...selectedUrls];
@@ -394,13 +424,25 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     await processChatStream(currentMessages, assistantId, fetchedCitations);
   };
 
+  const handleEquipmentAudit = async (reportContent: string) => {
+    const assistantMsgId = uuidv4();
+    const msg: Message = {
+      id: assistantMsgId,
+      role: 'assistant',
+      content: reportContent,
+      timestamp: Date.now(),
+    };
+    onUpdateMessages([...session.messages, msg]);
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden bg-[#1e1e2e]">
       <MessageList session={session} isGenerating={isGenerating} />
-      <ChatInput 
-        isGenerating={isGenerating} 
-        onSubmit={handleNormalSubmit} 
-        onTemplateSubmit={handleTemplateSubmit} 
+      <ChatInput
+        isGenerating={isGenerating}
+        onSubmit={handleNormalSubmit}
+        onTemplateSubmit={handleTemplateSubmit}
+        onEquipmentAudit={handleEquipmentAudit}
       />
     </div>
   );
