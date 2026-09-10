@@ -3,37 +3,36 @@ export interface MessageFile {
   name: string;
   url: string;
   content: string;
-  isTruncated?: boolean; 
+  isTruncated?: boolean;
   hasError?: boolean;
 }
 
 export interface MessageImage {
   name: string;
-  base64: string; 
+  base64: string;
 }
 
 export interface Citation {
   id: string;
-  type: 'file' | 'chat';
   name: string;
-  url?: string;
   content: string;
-  score?: number;
+  url?: string;
+  type?: 'file' | 'history';
 }
 
 export interface Message {
   id: string;
-  role: 'system' | 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   reasoningContent?: string;
   timestamp: number;
   files?: MessageFile[];
-  images?: MessageImage[]; 
-  imageBase64?: string;
+  images?: MessageImage[];
+  citations?: Citation[];
   isUploading?: boolean;
   progress?: number;
-  isTemplateCall?: boolean; 
-  citations?: Citation[]; 
+  isTemplateCall?: boolean;
+  speed?: string; // 【新增】用于记录生成速度
 }
 
 export interface ChatSession {
@@ -41,10 +40,4 @@ export interface ChatSession {
   title: string;
   messages: Message[];
   updatedAt: number;
-}
-
-export interface ModelInfo {
-  id: string;
-  object: string;
-  owned_by: string;
 }
