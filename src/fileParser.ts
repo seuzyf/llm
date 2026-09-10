@@ -10,7 +10,6 @@ export interface ParseResult {
   error?: string;
 }
 
-// 探测网页或文本的编码格式
 function detectEncoding(buffer: Buffer): string {
   const head = buffer.slice(0, 4096).toString('latin1');
   const metaMatch = head.match(/charset=["']?([a-zA-Z0-9\-_]+)/i) || head.match(/<meta[^>]+charset["'\s]*=["'\s]*([a-zA-Z0-9\-_]+)/i);
@@ -29,9 +28,6 @@ export async function parseFile(filePath: string, originalName: string): Promise
   const ext = path.extname(originalName).toLowerCase();
   console.log(`[FileParser] 解析扩展名: ${ext}`);
 
-  // ==========================================
-  // 1. Node.js 原生极速解析通道
-  // ==========================================
   const nativeSupported = ['.html', '.htm', '.xml', '.txt', '.csv', '.json', '.md'];
   
   if (nativeSupported.includes(ext)) {
@@ -67,13 +63,16 @@ export async function parseFile(filePath: string, originalName: string): Promise
     }
   }
 
-  // ==========================================
-  // 2. Python 复杂文档解析通道
-  // ==========================================
   console.log(`[FileParser] -> 进入 Python 解析通道...`);
   return new Promise((resolve) => {
     const scriptPath = path.resolve('parser.py');
     const py = spawn('python', [scriptPath, absPath]);
+
+    const timeoutId = setTimeout(() => {
+      py.kill();
+      console.log(`[FileParser] ❌ 解析超时，已强制终止 Python 进程`);
+      resolve({ text: '', error: '解析超时 (后台 Office COM 可能被弹窗或死锁阻塞)。建议将其转换为 .pptx 后再上传。' });
+    }, 30000); 
 
     let stdout = '';
     let stderr = '';
@@ -82,11 +81,13 @@ export async function parseFile(filePath: string, originalName: string): Promise
     py.stderr.on('data', (data) => { stderr += data.toString(); });
 
     py.on('close', (code) => {
+      clearTimeout(timeoutId); 
+
       const outText = stdout.trim();
       const errText = stderr.trim();
 
       if (code !== 0 || (!outText && errText)) {
-        console.log(`[FileParser] ❌ Python 解析器失败`);
+        console.log(`[FileParser] ❌ Python 解析器失败，具体原因: \n${errText}`);
         console.log(`========== [FileParser 解析流水线结束] ==========\n`);
         return resolve({ text: '', error: errText || 'Python 解析器异常崩溃' });
       }
@@ -97,6 +98,7 @@ export async function parseFile(filePath: string, originalName: string): Promise
     });
     
     py.on('error', (err) => {
+      clearTimeout(timeoutId);
       console.log(`========== [FileParser 解析流水线结束] ==========\n`);
       resolve({ text: '', error: `环境错误: ${err.message}` });
     });
