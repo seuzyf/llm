@@ -699,73 +699,45 @@ async function startServer() {
     return new Promise<void>((resolve) => {
       equipmentUpload(req, res, async (err) => {
         if (err) { resolve(); return res.status(400).json({ error: '上传失败' }); }
-        const fileCount = req.files ? (req.files as Express.Multer.File[]).length : 0;
-        if (!req.files || fileCount !== 2) { resolve(); return res.status(400).json({ error: '请上传恰好两个文件' }); }
+        if (!req.files || (req.files as Express.Multer.File[]).length === 0) { 
+          resolve(); return res.status(400).json({ error: '未上传文件' }); 
+        }
 
         try {
-          console.log('[EquipmentAudit] 开始解析文件...');
-          const files = req.files as Express.Multer.File[];
-          const standardFile = await parseFile(files[0].path, Buffer.from(files[0].originalname, 'latin1').toString('utf8'));
-          const reviewFile = await parseFile(files[1].path, Buffer.from(files[1].originalname, 'latin1').toString('utf8'));
-
-          console.log('[EquipmentAudit] 解析完成:', standardFile.text.length + reviewFile.text.length, '字符');
-
-          if (standardFile.text.startsWith('[⚠️') || !standardFile.text) {
-            resolve(); return res.status(500).json({ error: '生产设备技术标准解析失败', details: standardFile.error });
-          }
-          if (reviewFile.text.startsWith('[⚠️') || !reviewFile.text) {
-            resolve(); return res.status(500).json({ error: '需求评审表解析失败', details: reviewFile.error });
-          }
-
-          console.log('[EquipmentAudit] 加载 prompt 模板...');
+          console.log('[EquipmentAudit] 开始使用 parser.py 提取文件...');
+          
+          const scriptPath = path.join(process.cwd(), 'parser.py');
           const promptPath = path.join(process.cwd(), 'src', 'equipment_audit', 'prompt.txt');
-          if (!fs.existsSync(promptPath)) {
-            resolve(); return res.status(500).json({ error: '服务端未找到 equipment_audit/prompt.txt' });
+
+          if (!fs.existsSync(scriptPath) || !fs.existsSync(promptPath)) {
+            resolve(); return res.status(500).json({ error: '服务端未找到 parser.py 或 prompt.txt' });
           }
 
+          // 核心修改：使用 Python 脚本统一解析上传的文件，和审核供应商的提取方式完全一样
+          const { stdout } = await execPromise(`python "${scriptPath}" "${batchDir}"`);
+          
+          console.log('[EquipmentAudit] 加载 prompt 模板...');
           const promptTemplate = fs.readFileSync(promptPath, 'utf-8');
+          
+          // 将 parser.py 提取出的完整文本替换进 Prompt。
+          // 💡建议：你可以把 src/equipment_audit/prompt.txt 里的占位符统一改成 {excel_content}
           const finalPrompt = promptTemplate
-            .replace('{technical_standard}', standardFile.text)
-            .replace('{requirement_review}', reviewFile.text);
+            .replace('{excel_content}', stdout)
+            .replace('{content}', stdout)
+            .replace('{technical_standard}', stdout) // 兼容你之前分两个占位符的写法
+            .replace('{requirement_review}', '');    // 清空旧的多余占位符
 
-          console.log('[EquipmentAudit] 请求 LLM API...');
-          let modelId: string | undefined;
-          try {
-            const modelsRes = await fetch(`${LM_BASE_URL}/models`);
-            if (modelsRes.ok) {
-              const modelsData = await modelsRes.json();
-              if (modelsData?.data && modelsData.data.length > 0) modelId = modelsData.data[0].id;
-            }
-          } catch {}
-
-          const apiMessages: any[] = [
-            { role: 'user', content: finalPrompt },
-          ];
-
-          const response = await fetch(`${LM_BASE_URL}/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages: apiMessages, model: modelId }),
-          });
-
-          console.log('[EquipmentAudit] LLM API 响应状态:', response.status);
-
-          if (!response.ok) {
-            const errText = await response.text();
-            resolve(); return res.status(500).json({ error: 'LLM 请求失败', details: errText });
-          }
-
-          const data = await response.json();
-          const report = data?.choices?.[0]?.message?.content || '[⚠️ LLM 返回为空，请重试]';
-
-          console.log('[EquipmentAudit] 审核完成，报告长度:', report.length);
-
+          // 提取完立即清理临时文件
           try { fs.rmSync(batchDir, { recursive: true, force: true }); } catch {}
-          resolve(); return res.json({ report });
+          
+          // 将组装好的 Prompt 发给前端，触发流式打字输出
+          resolve(); return res.json({ prompt: finalPrompt });
+          
         } catch (error: any) {
-          console.log('[EquipmentAudit] 处理异常:', error.message);
+          console.log('[EquipmentAudit] 模板解析失败:', error.message);
+          try { fs.rmSync(batchDir, { recursive: true, force: true }); } catch {}
           if (!res.headersSent) {
-            resolve(); return res.status(500).json({ error: '审核处理失败', details: error.message });
+            resolve(); return res.status(500).json({ error: '模板解析失败', details: error.message });
           }
         }
       });
