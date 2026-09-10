@@ -30,7 +30,7 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
 
     let finalBotContent = '';
     let finalUserContent = '';
-    let firstTokenTime = 0; // 用于记录大模型吐出第一个字的时间
+    let firstTokenTime = 0; 
 
     try {
       let currentChars = 0;
@@ -138,7 +138,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
                 const reasoning = data.choices[0]?.delta?.reasoning_content || '';
 
                 if (content || reasoning) {
-                  // 记录首字输出时间
                   if (!firstTokenTime) firstTokenTime = Date.now();
                   
                   if (reasoning) assistantMsg.reasoningContent = (assistantMsg.reasoningContent || '') + reasoning;
@@ -159,12 +158,11 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         }
       }
       
-      // 流式读取彻底完毕，计算生成速度
       const endTime = Date.now();
       if (firstTokenTime > 0 && endTime > firstTokenTime) {
         const durationSec = (endTime - firstTokenTime) / 1000;
         const totalChars = assistantMsg.content.length + (assistantMsg.reasoningContent?.length || 0);
-        if (durationSec > 0.1) { // 避免除以0或极短时间造成的数值异常
+        if (durationSec > 0.1) {
           assistantMsg.speed = `${(totalChars / durationSec).toFixed(1)} 字/秒`;
         }
       }
@@ -184,14 +182,11 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
       }
     } finally {
-      // 1. 彻底关闭生成状态，解放 UI 主线程
       assistantMsg.timestamp = Date.now();
       onUpdateMessages([...currentMessages.slice(0, -1), { ...assistantMsg }]);
       setIsGenerating(false);
       abortControllerRef.current = null;
 
-      // 2. 利用 requestIdleCallback（浏览器空闲期执行）彻底杜绝抢占资源
-      // 这样就算延迟再久，也一定是等用户在安静看回复时才执行
       if (finalBotContent && finalBotContent.trim() !== '') {
         const embedUsername = getUsername();
         const executeEmbedding = () => {
@@ -210,7 +205,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
         if ('requestIdleCallback' in window) {
           (window as any).requestIdleCallback(executeEmbedding, { timeout: 10000 });
         } else {
-          // 降级方案：延迟 2 秒执行
           setTimeout(executeEmbedding, 2000);
         }
       }
@@ -266,6 +260,82 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
       await processChatStream(currentMessages, assistantId);
 
     } catch (error: any) {
+      currentMessages = currentMessages.map((m) =>
+        m.id === userMsgId ? { ...m, isUploading: false, content: m.content + `\n\n> ⚠️ **系统提示:** ${error.message}` } : m
+      );
+      onUpdateMessages(currentMessages);
+      setIsGenerating(false);
+    }
+  };
+
+  const handleEquipmentAudit = async (files: File[]) => {
+    if (files.length !== 2 || isGenerating) return;
+
+    // 1. 请求前，立即推入用户消息（显示为正在上传处理中）
+    const userMsgId = uuidv4();
+    const userMessage: Message = {
+      id: userMsgId,
+      role: 'user',
+      content: '【生产设备需求审核】',
+      timestamp: Date.now(),
+      files: files.map(f => ({ name: f.name, url: '', content: '' })),
+      isUploading: true,
+      progress: 0,
+      isTemplateCall: true, 
+    };
+
+    let currentMessages = [...session.messages, userMessage];
+    onUpdateMessages(currentMessages);
+    setIsGenerating(true);
+
+    try {
+      // 2. 将文件发给后端，让后端跑 Python 提取为 Prompt 文本
+      const formData = new FormData();
+      files.forEach(f => formData.append('files', f));
+
+      const res = await fetch('/api/audit-equipment', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        let errMsg: string;
+        try {
+          const errJson = JSON.parse(text);
+          errMsg = (errJson.details || errJson.error || JSON.stringify(errJson));
+        } catch {
+          errMsg = text;
+        }
+        throw new Error(`HTTP ${res.status}: ${errMsg}`);
+      }
+
+      const data = await res.json();
+      const finalPrompt = data.prompt; // 拿到拼接好的 Prompt
+
+      // 3. 文件提取成功，将用户消息置为“已完成”，并替换为真正的提示词
+      currentMessages = currentMessages.map(m =>
+        m.id === userMsgId ? { ...m, content: finalPrompt, isUploading: false, progress: 100 } : m
+      );
+      onUpdateMessages(currentMessages);
+
+      // 4. 插入一个空白的 AI 消息，准备接收流式数据
+      const assistantId = uuidv4();
+      const assistantMsg: Message = {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        reasoningContent: '',
+        timestamp: Date.now(),
+      };
+      currentMessages = [...currentMessages, assistantMsg];
+      onUpdateMessages(currentMessages);
+
+      // 5. 移交接力棒给原生的流式框架
+      await processChatStream(currentMessages, assistantId);
+
+    } catch (error: any) {
+      // 若出错，在用户消息下方追加错误提示
       currentMessages = currentMessages.map((m) =>
         m.id === userMsgId ? { ...m, isUploading: false, content: m.content + `\n\n> ⚠️ **系统提示:** ${error.message}` } : m
       );
@@ -422,17 +492,6 @@ export default function ChatArea({ session, onUpdateMessages, isGenerating, setI
     onUpdateMessages(currentMessages);
 
     await processChatStream(currentMessages, assistantId, fetchedCitations);
-  };
-
-  const handleEquipmentAudit = async (reportContent: string) => {
-    const assistantMsgId = uuidv4();
-    const msg: Message = {
-      id: assistantMsgId,
-      role: 'assistant',
-      content: reportContent,
-      timestamp: Date.now(),
-    };
-    onUpdateMessages([...session.messages, msg]);
   };
 
   return (
