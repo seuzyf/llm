@@ -6,6 +6,7 @@ import { defineConfig, loadEnv } from 'vite';
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
+    base: '/chat/', 
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
@@ -16,9 +17,10 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
+      port: 3000, 
+      allowedHosts: ['aiplatform.make.huawei.com'], // 👈 新增：将你的域名加入允许访问的白名单
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: {
-        // 使用绝对路径和多种通配符，确保在 Windows 环境下也能生效
         ignored: [
           '**/logs/**', 
           '**/uploads/**',
