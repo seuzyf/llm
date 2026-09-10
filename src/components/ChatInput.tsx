@@ -7,7 +7,8 @@ interface ChatInputProps {
   isGenerating: boolean;
   onSubmit: (input: string, files: File[], urls: string[], images: MessageImage[], isRAGEnabled: boolean, isPublic: boolean) => void;
   onTemplateSubmit: (files: File[]) => void;
-  onEquipmentAudit: (reportContent: string) => void;
+  // 修改接口签名：直接把上传的文件丢给 ChatArea 处理
+  onEquipmentAudit: (files: File[]) => void;
 }
 
 interface SelectedImageData {
@@ -222,53 +223,25 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
     setTemplateFiles([]);
   };
 
-  const handleEquipmentAuditSubmit = async (files: File[]) => {
-    if (files.length !== 2 || isSubmitting) return;
-
-    setIsProcessing(true);
-    try {
-      const formData = new FormData();
-      files.forEach(f => formData.append('files', f));
-
-      const res = await fetch('/api/audit-equipment', {
-        method: 'POST',
-        body: formData
-      });
-
-      if (!res.ok) {
-        // 先读文本再尝试解析 JSON，避免 body stream 被重复消费
-        const text = await res.text();
-        let errMsg: string;
-        try {
-          const errJson = JSON.parse(text);
-          errMsg = (errJson.details || errJson.error || JSON.stringify(errJson));
-        } catch {
-          errMsg = text; // HTML 错误页，直接显示内容
-        }
-        throw new Error(`HTTP ${res.status}: ${errMsg}`);
-      }
-
-      const data = await res.json();
-
-      // 将审核报告直接展示给用户（不经过 LLM 处理）
-      onEquipmentAudit(data.report);
-
-      setEquipmentAuditMode(false);
-      setAuditFiles([]);
-    } catch (error: any) {
-      alert(`审核失败：${error.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
+  // 修改：剥离多余的网络请求，只需将文件上传状态传递出去
+  const handleEquipmentAuditSubmitClick = () => {
+    if (auditFiles.length !== 2 || isSubmitting) return;
+    onEquipmentAudit(auditFiles);
+    setEquipmentAuditMode(false);
+    setAuditFiles([]);
   };
 
   return (
     <div className="p-4 bg-[#1e1e2e] border-t border-gray-800 shrink-0">
       <div className="max-w-4xl mx-auto relative">
         <div className="flex gap-2 mb-2">
+          
           <button
-            onClick={() => setTemplateMode(templateMode === 'audit_supplier' ? null : 'audit_supplier')}
-            disabled={isSubmitting}
+            onClick={() => {
+              setTemplateMode(templateMode === 'audit_supplier' ? null : 'audit_supplier');
+              setEquipmentAuditMode(false);
+            }}
+            disabled={isSubmitting || equipmentAuditMode} 
             className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
               templateMode === 'audit_supplier'
                 ? 'bg-[#313244] text-blue-400 border border-b-0 border-gray-700 shadow-[0_4px_0_0_#313244] translate-y-[1px] relative z-10'
@@ -281,7 +254,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
 
           <button
             onClick={() => setIsRAGEnabled(!isRAGEnabled)}
-            disabled={isSubmitting || !!templateMode}
+            disabled={isSubmitting || !!templateMode || equipmentAuditMode}
             className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
               isRAGEnabled
                 ? 'bg-[#1e3a5f] text-cyan-400 border border-b-0 border-cyan-800 shadow-[0_4px_0_0_#1e3a5f] translate-y-[1px] relative z-10'
@@ -293,7 +266,10 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
           </button>
 
           <button
-            onClick={() => setEquipmentAuditMode(!equipmentAuditMode)}
+            onClick={() => {
+              setEquipmentAuditMode(!equipmentAuditMode);
+              setTemplateMode(null);
+            }}
             disabled={isSubmitting || !!templateMode}
             className={`flex items-center gap-2 px-4 py-1.5 rounded-t-xl text-sm font-medium transition-all ${
               equipmentAuditMode
@@ -306,7 +282,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
           </button>
         </div>
 
-        {(selectedFiles.length > 0 || selectedUrls.length > 0 || selectedImages.length > 0) && !templateMode && (
+        {(selectedFiles.length > 0 || selectedUrls.length > 0 || selectedImages.length > 0) && !templateMode && !equipmentAuditMode && (
           <div className="absolute -top-[72px] left-0 right-0 z-10 flex gap-3 overflow-x-auto pb-2 items-end" style={{ scrollbarWidth: 'none' }}>
             {selectedImages.map((img, index) => (
               <div key={`img-${index}`} className="relative group shrink-0 shadow-lg">
@@ -363,7 +339,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
               <HardHat size={40} className="text-gray-500 mb-3 opacity-50" />
               <p className="text-gray-300 mb-6 text-sm">请上传《生产设备技术标准》和《生产设备引入需求评审表_机关》，系统将自动对比并列出异常</p>
 
-              {/* 文件1：生产设备技术标准 */}
               <div className="flex items-center gap-3 mb-4 w-full justify-center">
                 <span className="text-sm text-gray-400 shrink-0">{auditFiles[0]?.name ? '已上传' : '选择《生产设备技术标准》'}</span>
                 <input
@@ -375,7 +350,6 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
                 />
               </div>
 
-              {/* 文件2：生产设备引入需求评审表_机关 */}
               <div className="flex items-center gap-3 mb-4 w-full justify-center">
                 <span className="text-sm text-gray-400 shrink-0">{auditFiles[1]?.name ? '已上传' : '选择《生产设备引入需求评审表_机关》'}</span>
                 <input
@@ -399,7 +373,7 @@ export default function ChatInput({ isGenerating, onSubmit, onTemplateSubmit, on
 
               <div className="flex gap-3">
                 <button type="button" onClick={() => { setEquipmentAuditMode(false); setAuditFiles([]); }} disabled={isSubmitting} className="px-6 py-2.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50 transition-colors">取消</button>
-                <button type="button" onClick={() => { if (auditFiles.length >= 2) handleEquipmentAuditSubmit(auditFiles); }} disabled={auditFiles.length !== 2 || isSubmitting} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 shadow-md">开始审核</button>
+                <button type="button" onClick={handleEquipmentAuditSubmitClick} disabled={auditFiles.length !== 2 || isSubmitting} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 shadow-md">开始审核</button>
               </div>
             </div>
           ) : templateMode === 'audit_supplier' ? (
