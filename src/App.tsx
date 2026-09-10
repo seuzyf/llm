@@ -41,15 +41,20 @@ export default function App() {
     }
   };
 
+  // 【修复点】：增加防抖(Debounce) 机制，并拦截生成期间的持续网络请求
   useEffect(() => {
-    if (isLoggedIn && username && sessions.length > 0) {
+    if (!isLoggedIn || !username || sessions.length === 0 || isGenerating) return;
+
+    const timer = setTimeout(() => {
       fetch(`/api/logs/${username}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(sessions)
       }).catch(console.error);
-    }
-  }, [sessions, isLoggedIn, username]);
+    }, 1500); // 停止生成或输入后 1.5 秒再保存，避免网络请求风暴
+
+    return () => clearTimeout(timer);
+  }, [sessions, isLoggedIn, username, isGenerating]);
 
   const createNewSession = () => {
     const newSession: ChatSession = {
