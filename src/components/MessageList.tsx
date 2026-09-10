@@ -1,7 +1,7 @@
 // src/components/MessageList.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { Message, ChatSession, Citation } from '../types';
-import { Send, FileText, Link, AlertTriangle, AlertCircle, Brain, ChevronRight, ChevronDown, FileSpreadsheet, Download, History, X, Database } from 'lucide-react';
+import { Send, FileText, Link, AlertTriangle, AlertCircle, Brain, ChevronRight, ChevronDown, FileSpreadsheet, Download, History, X, Database, Zap } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -39,14 +39,25 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
 
           return (
             <div key={message.id} className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
-              <span className="text-xs text-gray-500 mb-1 mx-2 opacity-75">
-                {message.role === 'user' 
-                  ? `发送于 ${new Date(message.timestamp).toLocaleString('zh-CN', { hour12: false })}` 
-                  : isCurrentGenerating
-                    ? '正在回复...'
-                    : `回复完成于 ${new Date(message.timestamp).toLocaleString('zh-CN', { hour12: false })}`
-                }
-              </span>
+              
+              {/* 【更新】：时间戳与生成速度统计展示 */}
+              <div className="flex items-center gap-2 mb-1 mx-2">
+                <span className="text-xs text-gray-500 opacity-75">
+                  {message.role === 'user' 
+                    ? `发送于 ${new Date(message.timestamp).toLocaleString('zh-CN', { hour12: false })}` 
+                    : isCurrentGenerating
+                      ? '正在回复...'
+                      : `回复完成于 ${new Date(message.timestamp).toLocaleString('zh-CN', { hour12: false })}`
+                  }
+                </span>
+                
+                {message.role === 'assistant' && !isCurrentGenerating && message.speed && (
+                  <span className="text-[10px] text-gray-400 bg-gray-800/60 px-1.5 py-0.5 rounded flex items-center gap-1 shadow-sm">
+                    <Zap size={10} className="text-yellow-500" />
+                    {message.speed}
+                  </span>
+                )}
+              </div>
 
               <div className={`max-w-[85%] md:max-w-[75%] rounded-2xl px-5 py-4 ${
                   message.role === 'user'
@@ -175,7 +186,6 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
                         }
                       }
 
-                      // 在此处将所有的 <br>, <br/>, <br /> 等替换为一个空格
                       displayContent = displayContent.replace(/<br\s*\/?>/gi, ' ');
                       displayReasoning = displayReasoning.replace(/<br\s*\/?>/gi, ' ');
 
@@ -224,7 +234,6 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
                             </ReactMarkdown>
                           </div>
 
-                          {/* 渲染引用来源胶囊按钮 */}
                           {message.citations && message.citations.length > 0 && (
                             <div className="mt-4 pt-4 border-t border-gray-700/50">
                               <div className="text-xs text-gray-400 mb-3 flex items-center gap-1.5">
@@ -245,6 +254,11 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
                               </div>
                             </div>
                           )}
+
+                          <div className="mt-4 pt-3 border-t border-gray-700/30 flex items-center gap-1.5 text-xs text-gray-500/80 select-none">
+                            <AlertTriangle size={13} className="text-yellow-600/80" />
+                            <span>内容由模型自动生成，可能存在幻觉或事实偏差，仅供参考。</span>
+                          </div>
                         </>
                       );
                     })()}
@@ -257,7 +271,6 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
       )}
       <div ref={messagesEndRef} />
 
-      {/* 对话历史/文件片段查看弹窗 */}
       {activeCitation && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-[#181825] border border-gray-700 rounded-xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
@@ -275,7 +288,6 @@ export default function MessageList({ session, isGenerating }: MessageListProps)
               {activeCitation.content}
             </div>
 
-            {/* 如果是文件类型，底部增加明确的下载按钮 */}
             {activeCitation.type === 'file' && activeCitation.url && (
               <div className="p-4 border-t border-gray-800 bg-[#1e1e2e] flex justify-end">
                 <a 
